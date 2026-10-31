@@ -132,6 +132,48 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     msg[0].data[0] = 0xFF
     self.assertFalse(self._rx(msg))
 
+  def _camera_steer_msg(self, steer_req):
+    values = {"STEER_REQUEST": steer_req, "TORQUE_CMD": 0}
+    return self.packer.make_can_msg_safety("STEER_CMD", 2, values)
+
+  def test_stock_lkas_passthrough(self):
+    # openpilot disengaged, camera not steering: camera STEER_CMD blocked, openpilot's (inactive) allowed
+    self.safety.set_controls_allowed(False)
+    self._rx(self._camera_steer_msg(0))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x12B))
+    self.assertTrue(self._tx(self._torque_cmd_msg(0, steer_req=0)))
+
+    # openpilot disengaged, camera steering: camera STEER_CMD forwarded, openpilot's blocked
+    self._rx(self._camera_steer_msg(1))
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x12B))
+    self.assertFalse(self._tx(self._torque_cmd_msg(0, steer_req=0)))
+
+    # camera stops steering: back to blocking the camera
+    self._rx(self._camera_steer_msg(0))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x12B))
+    self.assertTrue(self._tx(self._torque_cmd_msg(0, steer_req=0)))
+
+  def test_openpilot_takes_over_from_stock_lkas(self):
+    self.safety.set_controls_allowed(False)
+    self._rx(self._camera_steer_msg(1))
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x12B))
+
+    # openpilot engages while the camera keeps requesting: openpilot steers, camera blocked
+    self.safety.set_controls_allowed(True)
+    self._rx(self._camera_steer_msg(1))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x12B))
+    self.assertTrue(self._tx(self._torque_cmd_msg(0, steer_req=1)))
+
+    # disengage: stock LKAS resumes on the next camera frame
+    self.safety.set_controls_allowed(False)
+    self._rx(self._camera_steer_msg(1))
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x12B))
+
+  def test_stock_lkas_reset_on_init(self):
+    self.safety.set_controls_allowed(False)
+    self._rx(self._camera_steer_msg(1))
+    self._reset_safety_hooks()
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x12B))
 
 if __name__ == "__main__":
   unittest.main()

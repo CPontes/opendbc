@@ -45,18 +45,22 @@ class CarController(CarControllerBase):
         apply_torque = apply_torque * 2
       if not lat_active:
         apply_torque = 0
-      can_sends.append(gwmcan.create_steer_command(
-        self.packer,
-        self.CAN,
-        camera_stock_values=CS.camera_stock_values,
-        steer=apply_torque,
-        steer_req=lat_active,
-      ))
+      # while openpilot is disengaged the panda forwards the camera's own LKAS command instead
+      stock_lkas = not CC.enabled and bool(CS.camera_stock_values["STEER_REQUEST"])
+      if not stock_lkas:
+        can_sends.append(gwmcan.create_steer_command(
+          self.packer,
+          self.CAN,
+          camera_stock_values=CS.camera_stock_values,
+          steer=apply_torque,
+          steer_req=lat_active,
+        ))
       self.apply_torque_last = apply_torque
 
       # Satisfy steer nudge requests
       ea_simulated_torque = float(np.clip(apply_torque * 2, -self.params.STEER_MAX, self.params.STEER_MAX))
-      if abs(CS.out.steeringTorque) > abs(ea_simulated_torque):
+      # pass the real driver torque to the camera when openpilot is not steering (stock LKAS hands-on detection)
+      if abs(CS.out.steeringTorque) > abs(ea_simulated_torque) or not CC.latActive:
         ea_simulated_torque = CS.out.steeringTorque
       can_sends.append(gwmcan.create_wheel_touch(
         self.packer,

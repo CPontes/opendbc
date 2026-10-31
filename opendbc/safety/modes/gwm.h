@@ -17,6 +17,10 @@
 #define GWM_MAIN_BUS 0U
 #define GWM_CAMERA_BUS  2U
 
+// stock LKAS pass-through: while openpilot is not engaged, the camera's own
+// steering command is forwarded to the EPS and openpilot's is not sent
+static bool gwm_stock_lkas = false;
+
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
   if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
@@ -63,7 +67,16 @@ static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
   return chksum;
 }
 
+static void gwm_update_stock_lkas(const CANPacket_t *msg) {
+  if (msg_matches(msg, GWM_STEER_CMD, GWM_CAMERA_BUS)) {
+    // camera requests steering and openpilot is not engaged
+    gwm_stock_lkas = GET_BIT(msg, 125U) && !controls_allowed;
+  }
+}
+
 static void gwm_rx_hook(const CANPacket_t *msg) {
+  gwm_update_stock_lkas(msg);
+
   if (msg->bus == GWM_MAIN_BUS) {
     // GAS_POSITION
     if (msg->addr == GWM_GAS) {
@@ -138,6 +151,8 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
       desired_torque = to_signed(desired_torque, 10) + 1;
       bool steer_req = GET_BIT(msg, 125U);
       violation |= steer_torque_cmd_checks(desired_torque, steer_req, GWM_TORQUE_STEERING_LIMITS);
+      // the camera's command is being forwarded instead
+      violation |= gwm_stock_lkas;
     }
 
     if (msg->addr == GWM_LONG_CONTROL) {
@@ -157,18 +172,23 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static bool gwm_fwd_hook(int bus_num, int addr) {
+  // STEER_CMD is statically allowed to forward, block it unless stock LKAS is in control
+  return (bus_num == (int)GWM_CAMERA_BUS) && (addr == (int)GWM_STEER_CMD) && !gwm_stock_lkas;
+}
+
 static safety_config gwm_init(uint16_t param) {
   static const CanMsg GWM_TX_MSGS[] = {
     {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
-    {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
+    {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true, .disable_static_blocking = true}, // Steering command, forwarding handled by gwm_fwd_hook
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
 
   static const CanMsg GWM_LONG_TX_MSGS[] = {
     {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
-    {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
+    {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true, .disable_static_blocking = true}, // Steering command, forwarding handled by gwm_fwd_hook
     {GWM_LONG_CONTROL, GWM_MAIN_BUS, 64, .check_relay = true}, // Longitudinal control message from camera
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
@@ -185,6 +205,8 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_BLIND_SPOT, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Blind spot monitor
     {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
   };
+
+  gwm_stock_lkas = false;
 
   bool gwm_longitudinal = false;
 #ifdef ALLOW_DEBUG
@@ -205,6 +227,7 @@ const safety_hooks gwm_hooks = {
   .init = gwm_init,
   .rx = gwm_rx_hook,
   .tx = gwm_tx_hook,
+  .fwd = gwm_fwd_hook,
   .get_counter = gwm_get_counter,
   .get_checksum = gwm_get_checksum,
   .compute_checksum = gwm_compute_checksum,
