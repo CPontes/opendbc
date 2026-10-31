@@ -23,7 +23,10 @@ class CarController(CarControllerBase):
   def update(self, CC, CS, now_nanos):
     can_sends = []
     actuators = CC.actuators
-    lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
+    # Only let go when the driver steers against openpilot. In tight curves the driver usually helps in the
+    # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
+    driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
+    lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     if CC.cruiseControl.cancel:
