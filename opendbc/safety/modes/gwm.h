@@ -17,6 +17,12 @@
 #define GWM_MAIN_BUS 0U
 #define GWM_CAMERA_BUS  2U
 
+// always-on lateral: the brake pauses openpilot longitudinal only, steering stays
+// engaged until the cancel button. Longitudinal resumes on the next lever pull.
+static bool gwm_always_on_lateral = false;
+static bool gwm_long_allowed = false;
+static bool gwm_brake_pressed_prev = false;
+
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
   if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
@@ -81,7 +87,16 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
     }
 
     if (msg->addr == GWM_BRAKE) {
-      brake_pressed = GET_BIT(msg, 11U);
+      bool pressed = GET_BIT(msg, 11U);
+      if (gwm_always_on_lateral) {
+        // keep the generic brake disengage from dropping lateral, pause longitudinal instead
+        if (pressed && (!gwm_brake_pressed_prev || vehicle_moving)) {
+          gwm_long_allowed = false;
+        }
+        gwm_brake_pressed_prev = pressed;
+      } else {
+        brake_pressed = pressed;
+      }
     }
 
     if (msg->addr == GWM_RX_STEER_RELATED) {
@@ -100,11 +115,13 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
       // enter controls on the rising edge of set or resume
       if (cruise_button && !cruise_button_prev) {
         acc_main_on = true;
+        gwm_long_allowed = true;
       }
       // exit controls once cancel is pressed
       bool cancel_button = GET_BIT(msg, 46U);
       if (cancel_button || brake_pressed) {
         acc_main_on = false;
+        gwm_long_allowed = false;
       }
       pcm_cruise_check(acc_main_on);
       cruise_button_prev =  cruise_button ? 1 : 0;
@@ -148,6 +165,10 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
       int gas_raw = ((msg->data[27] & 0x1FU) << 8) | (msg->data[28]);
       gas_raw = gas_raw - 192;
       violation |= longitudinal_gas_checks(gas_raw, GWM_LONG_LIMITS);
+
+      // longitudinal paused by the brake in always-on lateral: only inactive commands
+      bool long_paused = gwm_always_on_lateral && !gwm_long_allowed;
+      violation |= long_paused && ((brake_raw != 0) || (gas_raw != GWM_LONG_LIMITS.inactive_gas));
     }
   }
 
@@ -186,12 +207,15 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
   };
 
+  const int FLAG_GWM_ALWAYS_ON_LATERAL = 2;
+  gwm_always_on_lateral = GET_FLAG(param, FLAG_GWM_ALWAYS_ON_LATERAL);
+  gwm_long_allowed = false;
+  gwm_brake_pressed_prev = false;
+
   bool gwm_longitudinal = false;
 #ifdef ALLOW_DEBUG
   const int FLAG_GWM_LONG_CONTROL = 1;
   gwm_longitudinal = GET_FLAG(param, FLAG_GWM_LONG_CONTROL);
-#else
-  SAFETY_UNUSED(param);
 #endif
 
   // FIXME: cppcheck thinks that gwm_longitudinal is always false. This is not true

@@ -23,6 +23,7 @@ class CarControllerParams:
 
 class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
+  ALWAYS_ON_LATERAL = 2  # brake pauses longitudinal only, steering stays engaged until cancel
 
 
 @dataclass

@@ -133,5 +133,93 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     self.assertFalse(self._rx(msg))
 
 
+class TestGwmAlwaysOnLateral(common.SafetyTestBase):
+  """Brake pauses longitudinal only, steering stays engaged until cancel; lever resumes longitudinal."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety(opendbc)
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL)
+    self.safety.init_tests()
+    self.stalk_counter = 0
+
+  def _stalk(self, enable=0, cancel=0):
+    self.stalk_counter = (self.stalk_counter + 1) % 16
+    values = {"AP_ENABLE_COMMAND": enable, "AP_CANCEL_COMMAND": cancel, "COUNTER": self.stalk_counter}
+    return self._rx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, values, fix_checksum=checksum))
+
+  def _pull_lever(self):
+    self._stalk(enable=1)
+    self._stalk(enable=0)
+
+  def _brake(self, pressed):
+    return self._rx(self.packer.make_can_msg_safety("BRAKE2", 0, {"PEDAL_BRAKE_PRESSED": pressed}))
+
+  def _speed(self, speed):
+    values = {f"{pos}_WHEEL_SPEED": speed * 3.6 for pos in ["FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT"]}
+    return self._rx(self.packer.make_can_msg_safety("WHEEL_SPEEDS", 0, values, fix_checksum=checksum))
+
+  def _steer_ok(self):
+    msg = self.packer.make_can_msg_safety("STEER_CMD", 0, {"STEER_REQUEST": 1, "TORQUE_CMD": 0})
+    return self._tx(msg)
+
+  def _gas_ok(self, gas):
+    return self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"GAS_CMD": gas, "BRAKE_CMD": 0}))
+
+  def _brake_cmd_ok(self, brake):
+    return self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"GAS_CMD": 0, "BRAKE_CMD": -brake}))
+
+  def test_brake_pauses_longitudinal_only(self):
+    self._speed(10)
+    self._pull_lever()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._gas_ok(1000))
+    self.assertTrue(self._brake_cmd_ok(50))
+
+    # brake while moving: steering stays, longitudinal limited to inactive commands
+    self._brake(1)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._steer_ok())
+    self.assertFalse(self._gas_ok(1000))
+    self.assertFalse(self._brake_cmd_ok(50))
+    self.assertTrue(self._gas_ok(0))
+
+    # releasing the brake does not resume longitudinal
+    self._brake(0)
+    self.assertFalse(self._gas_ok(1000))
+    self.assertTrue(self._steer_ok())
+
+    # lever pull resumes it
+    self._pull_lever()
+    self.assertTrue(self._gas_ok(1000))
+
+  def test_brake_at_standstill_pauses_longitudinal(self):
+    self._speed(0)
+    self._pull_lever()
+    self._brake(1)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self._gas_ok(1000))
+
+  def test_cancel_disengages_everything(self):
+    self._speed(10)
+    self._pull_lever()
+    self._stalk(cancel=1)
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self._gas_ok(1000))
+
+  def test_no_longitudinal_before_lever(self):
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._gas_ok(1000))
+    self.assertTrue(self._gas_ok(0))
+
+  def test_flag_off_brake_disengages(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL)
+    self.safety.init_tests()
+    self._speed(10)
+    self._pull_lever()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._brake(1)
+    self.assertFalse(self.safety.get_controls_allowed())
+
 if __name__ == "__main__":
   unittest.main()

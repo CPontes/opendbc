@@ -2,9 +2,10 @@ from opendbc.car import Bus, CanBusBase, structs
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.gwm.values import DBC
+from opendbc.car.gwm.values import DBC, GwmSafetyFlags
 import copy
 
+ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 
@@ -79,10 +80,16 @@ class CarState(CarStateBase):
     ret.leftBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_LEFT"] > 0)
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
-    if cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"] or ret.brakePressed:
+    # with always-on lateral the brake only pauses longitudinal (handled in selfdrived), it doesn't disengage
+    always_on_lateral = bool(self.CP.safetyConfigs[-1].safetyParam & GwmSafetyFlags.ALWAYS_ON_LATERAL)
+    if cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"] or (ret.brakePressed and not always_on_lateral):
       self.main_on = False
     self.is_activation_lever_pulled = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
-    if not self.is_activation_lever_pulled and self.prev_activation_lever_pulled and not self.main_on:
+    lever_released = not self.is_activation_lever_pulled and self.prev_activation_lever_pulled
+    if lever_released and self.main_on and always_on_lateral:
+      # lever pulled while engaged: resume longitudinal after a brake pause
+      ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise)]
+    if lever_released and not self.main_on:
       self.main_on = True
     self.prev_activation_lever_pulled = self.is_activation_lever_pulled
 
