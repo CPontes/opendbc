@@ -34,7 +34,6 @@ class CarController(CarControllerBase):
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
     lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
-    self.lat_active = lat_active
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     if CC.cruiseControl.cancel and CS.steer_and_ap_stalk_msg is not None:
@@ -48,6 +47,9 @@ class CarController(CarControllerBase):
       ))
 
     if self.frame % 2 == 0: # 50 Hz
+      # Track the actual transmitted request; no original means no replacement request.
+      # Between transmit cycles, keep the state of the last emitted command.
+      self.lat_active = False
       # Steer command
       torque_scale = float(np.interp(CS.out.vEgo, LOW_SPEED_TORQUE_BP, LOW_SPEED_TORQUE_V))
       new_torque = int(round(actuators.torque * self.params.STEER_MAX * torque_scale))
@@ -65,6 +67,7 @@ class CarController(CarControllerBase):
           steer=apply_torque,
           steer_req=lat_active,
         ))
+        self.lat_active = lat_active
       self.apply_torque_last = apply_torque
 
       # Satisfy steer nudge requests
