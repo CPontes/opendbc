@@ -214,7 +214,7 @@ static safety_config gwm_init(uint16_t param) {
 
   bool gwm_longitudinal = false;
 #ifdef ALLOW_DEBUG
-  const int FLAG_GWM_LONG_CONTROL = 1;
+  const uint32_t FLAG_GWM_LONG_CONTROL = 1U;
   gwm_longitudinal = GET_FLAG(param, FLAG_GWM_LONG_CONTROL);
 #endif
 
