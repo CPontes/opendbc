@@ -25,7 +25,8 @@ class TestGwmCarController:
       longitudinal_stock_values=zeros(dbc, "ACC_CMD"),
     )
 
-  def _steer(self, torque, driver_torque, frames=40):
+  def _steer(self, torque, driver_torque, frames=40, v_ego=15.):
+    self.CS.out.vEgo = v_ego
     CC = structs.CarControl()
     CC.latActive = True
     CC.enabled = True
@@ -50,3 +51,8 @@ class TestGwmCarController:
 
   def test_light_touch_keeps_torque(self):
     assert self._steer(1.0, -60) > 0
+
+  def test_low_speed_torque_scaled(self):
+    # full request, long enough to ramp past the limit
+    assert abs(self._steer(1.0, 0, frames=200, v_ego=10 / 3.6)) <= 127
+    assert abs(self._steer(1.0, 0, frames=200, v_ego=40 / 3.6)) == 253
