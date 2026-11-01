@@ -207,7 +207,7 @@ static safety_config gwm_init(uint16_t param) {
     {.msg = {{GWM_HUD, GWM_CAMERA_BUS, 64, 20U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // HUD and dashboard
   };
 
-  const int FLAG_GWM_ALWAYS_ON_LATERAL = 2;
+  const uint32_t FLAG_GWM_ALWAYS_ON_LATERAL = 2U;
   gwm_always_on_lateral = GET_FLAG(param, FLAG_GWM_ALWAYS_ON_LATERAL);
   gwm_long_allowed = false;
   gwm_brake_pressed_prev = false;
