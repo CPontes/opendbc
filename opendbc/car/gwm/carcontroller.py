@@ -34,11 +34,10 @@ class CarController(CarControllerBase):
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
     lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
-    self.lat_active = lat_active
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
-    if CC.cruiseControl.cancel:
-      counter = (CS.steer_and_ap_stalk_msg['COUNTER'] + 1) % 16
+    if CC.cruiseControl.cancel and CS.steer_and_ap_stalk_msg is not None:
+      counter = (CS.steer_and_ap_stalk_msg[7] + 1) % 16
       can_sends.append(gwmcan.create_buttons_command(
         self.packer,
         self.CAN,
@@ -48,6 +47,9 @@ class CarController(CarControllerBase):
       ))
 
     if self.frame % 2 == 0: # 50 Hz
+      # Track the actual transmitted request; no original means no replacement request.
+      # Between transmit cycles, keep the state of the last emitted command.
+      self.lat_active = False
       # Steer command
       torque_scale = float(np.interp(CS.out.vEgo, LOW_SPEED_TORQUE_BP, LOW_SPEED_TORQUE_V))
       new_torque = int(round(actuators.torque * self.params.STEER_MAX * torque_scale))
@@ -55,30 +57,33 @@ class CarController(CarControllerBase):
       # Prevent sending the same 'apply_torque = 1' torque repeatedly, as it can cause EPS faults.
       if abs(apply_torque) == 1:
         apply_torque = apply_torque * 2
-      if not lat_active:
+      if not lat_active or CS.camera_stock_data is None:
         apply_torque = 0
-      can_sends.append(gwmcan.create_steer_command(
-        self.packer,
-        self.CAN,
-        camera_stock_values=CS.camera_stock_values,
-        steer=apply_torque,
-        steer_req=lat_active,
-      ))
+      if CS.camera_stock_data is not None:
+        can_sends.append(gwmcan.create_steer_command(
+          self.packer,
+          self.CAN,
+          camera_stock_data=CS.camera_stock_data,
+          steer=apply_torque,
+          steer_req=lat_active,
+        ))
+        self.lat_active = lat_active
       self.apply_torque_last = apply_torque
 
       # Satisfy steer nudge requests
       ea_simulated_torque = float(np.clip(apply_torque * 2, -self.params.STEER_MAX, self.params.STEER_MAX))
       if abs(CS.out.steeringTorque) > abs(ea_simulated_torque):
         ea_simulated_torque = CS.out.steeringTorque
-      can_sends.append(gwmcan.create_wheel_touch(
-        self.packer,
-        self.CAN,
-        eps_stock_values=CS.eps_stock_values,
-        ea_simulated_torque=ea_simulated_torque,
-      ))
+      if CS.eps_stock_data is not None:
+        can_sends.append(gwmcan.create_wheel_touch(
+          self.packer,
+          self.CAN,
+          eps_stock_data=CS.eps_stock_data,
+          ea_simulated_torque=ea_simulated_torque,
+        ))
 
       # Longitudinal control
-      if self.CP.openpilotLongitudinalControl:
+      if self.CP.openpilotLongitudinalControl and CS.longitudinal_stock_data is not None:
         standstill = actuators.longControlState == LongCtrlState.stopping
         self.accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         if self.accel < 0:
@@ -88,18 +93,18 @@ class CarController(CarControllerBase):
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
-          longitudinal_stock_values=CS.longitudinal_stock_values,
+          longitudinal_stock_data=CS.longitudinal_stock_data,
           accel=accel,
           active=CC.longActive,
           standstill=standstill,
         ))
 
-    if self.frame % 5 == 0: # 20 Hz
+    if self.frame % 5 == 0 and CS.hud_stock_data is not None: # 20 Hz
       # HUD updates
       can_sends.append(gwmcan.create_hud_command(
         self.packer,
         self.CAN,
-        hud_stock_values=CS.hud_stock_values,
+        hud_stock_data=CS.hud_stock_data,
         steer_required=CC.latActive,
       ))
 
