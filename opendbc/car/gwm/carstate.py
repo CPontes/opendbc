@@ -3,21 +3,26 @@ from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gwm.values import DBC, GwmSafetyFlags
-import copy
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 
 
+def get_stock_data(parser, name):
+  # Never synthesize a stock frame from zero-initialized signals or a truncated payload.
+  data = parser.vl_raw.get(name)
+  return data if data is not None and len(data) == parser.dbc.name_to_msg[name].size else None
+
+
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
-    self.steer_and_ap_stalk_msg = {}
-    self.eps_stock_values = {}
-    self.camera_stock_values = {}
-    self.longitudinal_stock_values = {}
-    self.hud_stock_values = {}
+    self.steer_and_ap_stalk_msg: bytes | None = None
+    self.eps_stock_data: bytes | None = None
+    self.camera_stock_data: bytes | None = None
+    self.longitudinal_stock_data: bytes | None = None
+    self.hud_stock_data: bytes | None = None
 
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
@@ -29,11 +34,11 @@ class CarState(CarStateBase):
     cp_cam = can_parsers[Bus.cam]
     ret = structs.CarState()
 
-    self.steer_and_ap_stalk_msg = copy.copy(cp.vl["STEER_AND_AP_STALK"])
-    self.eps_stock_values = copy.copy(cp.vl["RX_STEER_RELATED"])
-    self.camera_stock_values = copy.copy(cp_cam.vl["STEER_CMD"])
-    self.longitudinal_stock_values = copy.copy(cp_cam.vl["ACC_CMD"])
-    self.hud_stock_values = copy.copy(cp_cam.vl["LATERAL_STATE"])
+    self.steer_and_ap_stalk_msg = get_stock_data(cp, "STEER_AND_AP_STALK")
+    self.eps_stock_data = get_stock_data(cp, "RX_STEER_RELATED")
+    self.camera_stock_data = get_stock_data(cp_cam, "STEER_CMD")
+    self.longitudinal_stock_data = get_stock_data(cp_cam, "ACC_CMD")
+    self.hud_stock_data = get_stock_data(cp_cam, "LATERAL_STATE")
 
     self.parse_wheel_speeds(ret,
       cp.vl["WHEEL_SPEEDS"]["FRONT_LEFT_WHEEL_SPEED"],
@@ -108,7 +113,7 @@ class CarState(CarStateBase):
     cam_bus = can_base.offset + 2
 
     return {
-      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [], main_bus),
+      Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [("STEER_AND_AP_STALK", 0), ("RX_STEER_RELATED", 0)], main_bus),
       Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], adas_bus),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], cam_bus),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [("STEER_CMD", 0), ("ACC_CMD", 0), ("LATERAL_STATE", 0)], cam_bus),
     }

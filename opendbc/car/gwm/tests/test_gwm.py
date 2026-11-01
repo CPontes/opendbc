@@ -8,7 +8,7 @@ from opendbc.car import Bus
 
 
 def zeros(dbc, msg):
-  return {sig: 0 for sig in dbc.name_to_msg[msg].sigs}
+  return bytes(dbc.name_to_msg[msg].size)
 
 
 class TestGwmCarController:
@@ -18,11 +18,11 @@ class TestGwmCarController:
     dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
     self.CS = SimpleNamespace(
       out=structs.CarState(),
-      camera_stock_values=zeros(dbc, "STEER_CMD"),
-      eps_stock_values=zeros(dbc, "RX_STEER_RELATED"),
+      camera_stock_data=zeros(dbc, "STEER_CMD"),
+      eps_stock_data=zeros(dbc, "RX_STEER_RELATED"),
       steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"),
-      hud_stock_values=zeros(dbc, "LATERAL_STATE"),
-      longitudinal_stock_values=zeros(dbc, "ACC_CMD"),
+      hud_stock_data=zeros(dbc, "LATERAL_STATE"),
+      longitudinal_stock_data=zeros(dbc, "ACC_CMD"),
     )
 
   def _steer(self, torque, driver_torque, frames=40, v_ego=15.):

@@ -1,5 +1,6 @@
 import numpy as np
 from opendbc.car import CanBusBase
+from opendbc.can.packer import set_value
 
 
 class CanBus(CanBusBase):
@@ -19,148 +20,86 @@ class CanBus(CanBusBase):
     return self.offset + 2
 
 
-def create_steer_command(packer, CAN: CanBus, camera_stock_values, steer: float, steer_req: bool):
+def _update_fields(packer, name, stock_data: bytes, values):
+  """Pack only owned fields, leaving every other bit of the original frame intact."""
+  msg = packer.dbc.name_to_msg[name]
+  if len(stock_data) != msg.size:
+    raise ValueError(f"{name}: expected {msg.size} bytes, got {len(stock_data)}")
+  encoded = packer.make_can_msg(name, 0, values)[1]
+  mask = bytearray(msg.size)
+  for field in values:
+    signal = msg.sigs[field]
+    set_value(mask, signal, (1 << signal.size) - 1)
+  return bytes((original & ~bits) | (new & bits) for original, new, bits in zip(stock_data, encoded, mask, strict=True))
+
+
+def _get_value(packer, name, stock_data, field):
+  signal = packer.dbc.name_to_msg[name].sigs[field]
+  value = signal.get_raw_value(stock_data)
+  if signal.is_signed and value & (1 << (signal.size - 1)):
+    value -= 1 << signal.size
+  return value * signal.factor + signal.offset
+
+
+def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: float, steer_req: bool):
   steer = int(steer)
   values = {
-    "STEER_REQUEST": 1 if steer_req else 0,
+    "STEER_REQUEST": int(steer_req),
     "SET_ME_X01": 1,
     "TORQUE_CMD": steer,
     "TORQUE_REFLECTED": -steer,
-    "INVERT_DIRECTION": 1 if (steer > 0 and steer_req) else 0,
-    "COUNTER": (camera_stock_values["COUNTER"] + 1) % 16,
-    "BYPASS_ME": camera_stock_values["BYPASS_ME"],
+    "INVERT_DIRECTION": int(steer > 0 and steer_req),
+    "COUNTER": (_get_value(packer, "STEER_CMD", camera_stock_data, "COUNTER") + 1) % 16,
   }
-
-  # calculate and insert basic checksum
-  dat = packer.make_can_msg("STEER_CMD", 0, values)[1]
-  values["BASIC_CHECKSUM"] = gwm_basic_chksum_for_0x12B(dat)
-  # calculate and insert CRC
-  dat = packer.make_can_msg("STEER_CMD", 0, values)[1]
-  values["CRC_X9B"] = checksum(dat[9:16], 0x9B)
-
-  return packer.make_can_msg("STEER_CMD", CAN.main, values)
+  dat = _update_fields(packer, "STEER_CMD", camera_stock_data, values)
+  dat = _update_fields(packer, "STEER_CMD", dat, {"BASIC_CHECKSUM": gwm_basic_chksum_for_0x12B(dat)})
+  dat = _update_fields(packer, "STEER_CMD", dat, {"CRC_X9B": checksum(dat[9:16], 0x9B)})
+  return 0x12B, dat, CAN.main
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_values, accel, active, standstill):
-  values = {s: longitudinal_stock_values[s] for s in [
-    "BYPASSME_1",
-    "SPEED_REAL",
-    "COUNTER_BRAKE",
-    "BYPASSME_2",
-    "BYPASS_ACC1",
-    "BYPASS_ACC2",
-    "COUNTER_ACC",
-  ]}
-
-  brake_or_gas = longitudinal_stock_values["BRAKE_OR_GAS_REQ"]
-  standstill1 = longitudinal_stock_values["STANDSTILL_1"]
-  standstill2 = longitudinal_stock_values["STANDSTILL_2"]
-  standstill3 = longitudinal_stock_values["STANDSTILL_3"]
-  brake_cmd = 0
-  accel_cmd = 0
+def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, active, standstill):
+  values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
+            ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
+  brake_cmd = accel_cmd = 0
   if accel < 0 and active:
-    brake_or_gas = 13
+    values.update(BRAKE_OR_GAS_REQ=13, STANDSTILL_1=int(standstill),
+                  STANDSTILL_2=3 if standstill else 4, STANDSTILL_3=0 if standstill else 1)
     brake_cmd = (accel * (107 - 41)) - 41
-    accel_cmd = 0
-    standstill1 = 1 if standstill else 0
-    standstill2 = 3 if standstill else 4 # 3 "active" 4 "inactive"
-    standstill3 = 0 if standstill else 1 # 0 "active" 1 "inactive"
   elif active:
-    brake_or_gas = 12
-    brake_cmd = 0
-    # accel_cmd = accel * 4577
+    values.update(BRAKE_OR_GAS_REQ=12, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
     accel_cmd = np.interp(accel, [0.25, 1], [0, 4577])
-    standstill1 = 0
-    standstill2 = 4 # 3 "active" 4 "inactive"
-    standstill3 = 1 # 0 "active" 1 "inactive"
-  values |= {
-    "BRAKE_OR_GAS_REQ": brake_or_gas,
-    "BRAKE_CMD": brake_cmd,
-    "GAS_CMD": accel_cmd,
-    "STANDSTILL_1": standstill1,
-    "STANDSTILL_2": standstill2,
-    "STANDSTILL_3": standstill3,
-  }
-
-  data = packer.make_can_msg("ACC_CMD", 0, values)[1]
-  values["CRC_BRAKE_0xEF"] = checksum(data[9:16], 0xEF)
-  values["CRC_ACC_0x87"] = checksum(data[25:32], 0x87)
-
-  return packer.make_can_msg("ACC_CMD", CAN.main, values)
-
-
-def create_wheel_touch(packer, CAN: CanBus, eps_stock_values, ea_simulated_torque: float):
-  values = {s: eps_stock_values[s] for s in [
-    "A_CRC_X61",
-    "A_BYPASSME_2",
-    "A_RX_STEER_REQUESTED",
-    "A_BYPASSME_1",
-    "A_COUNTER",
-    "B_CRC_X61",
-    "B_RX_DRIVER_TORQUE",
-    "B_BYPASSME_1",
-    "B_BYPASSME_2",
-    "B_RX_EPS_TORQUE",
-    "B_COUNTER",
-    "B_BYPASSME_3",
-  ]}
-
-  values.update({
-    "B_RX_DRIVER_TORQUE": ea_simulated_torque,
+  values.update(BRAKE_CMD=brake_cmd, GAS_CMD=accel_cmd)
+  dat = _update_fields(packer, "ACC_CMD", longitudinal_stock_data, values)
+  dat = _update_fields(packer, "ACC_CMD", dat, {
+    "CRC_BRAKE_0xEF": checksum(dat[9:16], 0xEF),
+    "CRC_ACC_0x87": checksum(dat[25:32], 0x87),
   })
-
-  # calculate checksum
-  dat = packer.make_can_msg("RX_STEER_RELATED", 0, values)[1]
-  values["B_CRC_X61"] = checksum(dat[9:16], 0x61)
-
-  return packer.make_can_msg("RX_STEER_RELATED", CAN.camera, values)
+  return 0x143, dat, CAN.main
 
 
-def create_buttons_command(packer, CAN: CanBus, counter, stock_msg, cancel_command=False):
-  values = {s: stock_msg[s] for s in [
-    "STEERING_ANGLE",
-    "STEERING_DIRECTION",
-    "STEERING_RATE",
-    "RATE_DIRECTION",
-    "AP_ENABLE_COMMAND",
-    "AP_DECREASE_SPEED_COMMAND",
-    "AP_INCREASE_SPEED_COMMAND",
-    "AP_REDUCE_DISTANCE_COMMAND",
-    "AP_INCREASE_DISTANCE_COMMAND",
-  ]}
+def create_wheel_touch(packer, CAN: CanBus, eps_stock_data: bytes, ea_simulated_torque: float):
+  # The first EPS block, its CRC, fault flags, counters and unknown bits pass through unchanged.
+  dat = _update_fields(packer, "RX_STEER_RELATED", eps_stock_data, {"B_RX_DRIVER_TORQUE": ea_simulated_torque})
+  dat = _update_fields(packer, "RX_STEER_RELATED", dat, {"B_CRC_X61": checksum(dat[9:16], 0x61)})
+  return 0x147, dat, CAN.camera
 
-  values |= {
-    "AP_CANCEL_COMMAND":  stock_msg["AP_CANCEL_COMMAND"] or cancel_command,
+
+def create_buttons_command(packer, CAN: CanBus, counter, stock_data: bytes, cancel_command=False):
+  values = {
+    "AP_CANCEL_COMMAND": bool(_get_value(packer, "STEER_AND_AP_STALK", stock_data, "AP_CANCEL_COMMAND") or cancel_command),
     "COUNTER": counter,
   }
-
-  data = packer.make_can_msg("STEER_AND_AP_STALK", 0, values)[1]
-  values["CRC_X2D"] = checksum(data[1:8], 0x2D)
-
-  return packer.make_can_msg('STEER_AND_AP_STALK', CAN.camera, values)
+  dat = _update_fields(packer, "STEER_AND_AP_STALK", stock_data, values)
+  dat = _update_fields(packer, "STEER_AND_AP_STALK", dat, {"CRC_X2D": checksum(dat[1:8], 0x2D)})
+  return 0xA1, dat, CAN.camera
 
 
-def create_hud_command(packer, CAN: CanBus, hud_stock_values, steer_required):
-  values = {s: hud_stock_values[s] for s in [
-    "BYPASSME_1",
-    "BYPASSME_2",
-    "BY_PASSME",
-    "COUNTER",
-    "BYPASSME_3",
-    "BYPASSME_4",
-    "BYPASSME_5",
-    "BYPASSME_6",
-    "CRUISE_STATE",
-  ]}
-
-  values |= {
-    "LKAS_STATE": 5 if steer_required else hud_stock_values["LKAS_STATE"],
-  }
-
-  data = packer.make_can_msg("LATERAL_STATE", 0, values)[1]
-  values["CRC_X66"] = checksum(data[17:24], 0x66)
-
-  return packer.make_can_msg("LATERAL_STATE", CAN.main, values)
+def create_hud_command(packer, CAN: CanBus, hud_stock_data: bytes, steer_required):
+  # With no requested change, still refresh the same CRC as the original implementation.
+  values = {"LKAS_STATE": 5} if steer_required else {}
+  dat = _update_fields(packer, "LATERAL_STATE", hud_stock_data, values)
+  dat = _update_fields(packer, "LATERAL_STATE", dat, {"CRC_X66": checksum(dat[17:24], 0x66)})
+  return 0x23D, dat, CAN.main
 
 
 def checksum(data, xor_output):
