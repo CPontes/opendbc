@@ -128,6 +128,12 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     stalk(1)
     self.assertTrue(self.safety.get_controls_allowed())
 
+  def test_counters_wrap_after_14(self):
+    # measured on the bus: 0xA1 and 0x13B go 13, 14, 0. Looping over the wrap only stays valid if 14 is the last value
+    for name in ("STEER_AND_AP_STALK", "WHEEL_SPEEDS"):
+      for counter in [13, 14, 0] * 10:
+        self.assertTrue(self._rx(self.packer.make_can_msg_safety(name, 0, {"COUNTER": counter}, fix_checksum=checksum)))
+
   def _torque_meas_msg(self, torque):
     # 11-bit signed signal clip to not produce errors on test
     torque_signal = dbc.name_to_msg["RX_STEER_RELATED"].sigs["B_RX_EPS_TORQUE"]
