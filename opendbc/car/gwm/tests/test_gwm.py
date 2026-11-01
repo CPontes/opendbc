@@ -58,9 +58,9 @@ class TestGwmCarController:
   def test_light_touch_keeps_torque(self):
     assert self._steer(1.0, -60) > 0
 
-  def test_low_speed_torque_scaled(self):
-    # full request, long enough to ramp past the limit
-    assert abs(self._steer(1.0, 0, frames=200, v_ego=10 / 3.6)) <= 127
+  def test_full_torque_at_any_speed(self):
+    # slow corners need all of it: low speed wobble is filtered in the request, not here
+    assert abs(self._steer(1.0, 0, frames=200, v_ego=10 / 3.6)) == 253
     assert abs(self._steer(1.0, 0, frames=200, v_ego=40 / 3.6)) == 253
 
 

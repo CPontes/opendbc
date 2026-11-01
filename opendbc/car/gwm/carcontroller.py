@@ -10,12 +10,6 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
 
-# Below ~30 km/h the torque controller's gain rises steeply and, with this EPS's lag, tiny lateral
-# accel errors turned into full torque: the wheel swung +-10 deg every 1-2 s in traffic while the
-# requested path was straight. Scaling the command down at low speed lowers that loop gain.
-LOW_SPEED_TORQUE_BP = [0., 15. / 3.6, 30. / 3.6]  # m/s
-LOW_SPEED_TORQUE_V = [0.5, 0.5, 1.0]
-
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
@@ -44,8 +38,7 @@ class CarController(CarControllerBase):
       # Between transmit cycles, keep the state of the last emitted command.
       self.lat_active = False
       # Steer command
-      torque_scale = float(np.interp(CS.out.vEgo, LOW_SPEED_TORQUE_BP, LOW_SPEED_TORQUE_V))
-      new_torque = int(round(actuators.torque * self.params.STEER_MAX * torque_scale))
+      new_torque = int(round(actuators.torque * self.params.STEER_MAX))
       apply_torque = apply_meas_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorqueEps, self.params)
       # Prevent sending the same 'apply_torque = 1' torque repeatedly, as it can cause EPS faults.
       if abs(apply_torque) == 1:
