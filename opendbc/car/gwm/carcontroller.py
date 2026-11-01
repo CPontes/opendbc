@@ -37,14 +37,7 @@ class CarController(CarControllerBase):
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     if CC.cruiseControl.cancel and CS.steer_and_ap_stalk_msg is not None:
-      counter = (CS.steer_and_ap_stalk_msg[7] + 1) % 16
-      can_sends.append(gwmcan.create_buttons_command(
-        self.packer,
-        self.CAN,
-        counter,
-        CS.steer_and_ap_stalk_msg,
-        cancel_command=True,
-      ))
+      can_sends.append(gwmcan.create_cancel_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
 
     if self.frame % 2 == 0: # 50 Hz
       # Track the actual transmitted request; no original means no replacement request.

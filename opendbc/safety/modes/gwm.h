@@ -174,6 +174,11 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // the stalk only goes out to cancel: no enable, no speed or distance button
+  if (msg->addr == GWM_ADAS_ACTIVATION) {
+    violation |= ((msg->data[5] & 0xF0U) != 0x40U) || ((msg->data[6] & 0x0CU) != 0U);
+  }
+
   if (violation) {
     tx = false;
   }

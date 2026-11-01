@@ -412,10 +412,20 @@ class TestCommands:
     assert car.field(STALK, frames[0], "COUNTER") == 7
     assert car.field(STALK, frames[0], "STEERING_ANGLE") == pytest.approx(12.5, abs=0.1)
 
-  def test_cancel_counter_wraps(self):
+  def test_cancel_counter_wraps_like_the_stock_one(self):
+    # measured: the stock counter goes 13, 14, 0. 15 never shows up in 1.46 million frames
     car = Car()
-    car.step(**{STALK: {"COUNTER": 15}})
+    car.step(**{STALK: {"COUNTER": 14}})
     assert car.field(STALK, car.sent(car.apply(cancel=True), STALK)[0], "COUNTER") == 0
+
+  def test_cancel_carries_no_other_button(self):
+    buttons = ("AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
+               "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND")
+    car = Car()
+    car.step(**{STALK: dict.fromkeys(buttons, 1)})
+    frame = car.sent(car.apply(cancel=True), STALK)[0]
+    assert car.field(STALK, frame, "AP_CANCEL_COMMAND") == 1
+    assert not any(car.field(STALK, frame, button) for button in buttons)
 
   def test_no_cancel_no_frame(self):
     car = Car()

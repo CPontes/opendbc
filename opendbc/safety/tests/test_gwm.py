@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import unittest
+from types import SimpleNamespace
 
 from opendbc.can.dbc import DBC
 from opendbc.car.gwm.values import GwmSafetyFlags
@@ -7,11 +8,15 @@ from opendbc.car.structs import CarParams
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.libsafety import libsafety_py
 from opendbc.safety.tests.common import CANPackerSafety
+from opendbc.car.gwm import gwmcan
 from opendbc.car.gwm.gwmcan import checksum as _checksum
 
 
 opendbc = "gwm_haval_h6_mk3_generated"
 dbc = DBC(opendbc)
+
+STALK_BUTTONS = ("AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
+                 "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND")
 
 
 def get_signal_range(signal):
@@ -90,6 +95,24 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     self.safety.set_controls_allowed(True)
     self._rx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, {"AP_CANCEL_COMMAND": 1}, fix_checksum=checksum))
     self.assertFalse(self.safety.get_controls_allowed())
+
+  def _stalk_tx(self, **values):
+    return self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, values, fix_checksum=checksum))
+
+  def test_stalk_only_goes_out_to_cancel(self):
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertTrue(self._stalk_tx(AP_CANCEL_COMMAND=1))
+      self.assertFalse(self._stalk_tx())
+      for button in STALK_BUTTONS:
+        self.assertFalse(self._stalk_tx(**{button: 1}))
+        self.assertFalse(self._stalk_tx(AP_CANCEL_COMMAND=1, **{button: 1}))
+
+  def test_cancel_frame_of_the_car_port_passes(self):
+    # with the driver on every button, the frame carcontroller builds still has to go out
+    stock = self.packer.make_can_msg("STEER_AND_AP_STALK", 0, dict.fromkeys(STALK_BUTTONS, 1))[1]
+    addr, dat, bus = gwmcan.create_cancel_command(self.packer, SimpleNamespace(camera=2), stock)
+    self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)))
 
   def test_new_pull_after_openpilot_dropped_out(self):
     def stalk(enable):

@@ -2,6 +2,8 @@ import numpy as np
 from opendbc.car import CanBusBase
 from opendbc.can.packer import set_value
 
+STALK_MAX_COUNTER = 14  # 0xA1 counts 0 to 14, 15 never shows up on the bus
+
 
 class CanBus(CanBusBase):
   def __init__(self, CP=None, fingerprint=None) -> None:
@@ -84,10 +86,16 @@ def create_wheel_touch(packer, CAN: CanBus, eps_stock_data: bytes, ea_simulated_
   return 0x147, dat, CAN.camera
 
 
-def create_buttons_command(packer, CAN: CanBus, counter, stock_data: bytes, cancel_command=False):
+def create_cancel_command(packer, CAN: CanBus, stock_data: bytes):
+  # Cancel and no other button, whatever the driver is pressing: the panda blocks anything else.
   values = {
-    "AP_CANCEL_COMMAND": bool(_get_value(packer, "STEER_AND_AP_STALK", stock_data, "AP_CANCEL_COMMAND") or cancel_command),
-    "COUNTER": counter,
+    "AP_CANCEL_COMMAND": 1,
+    "AP_ENABLE_COMMAND": 0,
+    "AP_INCREASE_SPEED_COMMAND": 0,
+    "AP_DECREASE_SPEED_COMMAND": 0,
+    "AP_INCREASE_DISTANCE_COMMAND": 0,
+    "AP_REDUCE_DISTANCE_COMMAND": 0,
+    "COUNTER": (_get_value(packer, "STEER_AND_AP_STALK", stock_data, "COUNTER") + 1) % (STALK_MAX_COUNTER + 1),
   }
   dat = _update_fields(packer, "STEER_AND_AP_STALK", stock_data, values)
   dat = _update_fields(packer, "STEER_AND_AP_STALK", dat, {"CRC_X2D": checksum(dat[1:8], 0x2D)})

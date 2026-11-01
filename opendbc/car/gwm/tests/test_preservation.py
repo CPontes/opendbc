@@ -90,12 +90,14 @@ class TestGwmPreservation(unittest.TestCase):
       self.assert_unchanged(original, output, {16:0xff, 17:0x38 if active else 0})
       self.assertEqual((output[17] >> 3) & 7, 5 if active else (original[17] >> 3) & 7)
       self.assertEqual(output[16], gwmcan.checksum(output[17:24], 0x66))
-      for counter in range(16):
-        original = rng.randbytes(8)
-        output = gwmcan.create_buttons_command(self.packer, self.bus, counter, original, active)[1]
-        self.assert_unchanged(original, output, {0:0xff, 5:0x40, 7:0xf})
-        self.assertEqual(output[7] & 0xf, counter)
-        self.assertEqual(bool(output[5] & 0x40), bool(original[5] & 0x40) or active)
+      for counter in range(15):
+        original = bytearray(rng.randbytes(8))
+        original[7] = (original[7] & 0xf0) | counter
+        output = gwmcan.create_cancel_command(self.packer, self.bus, bytes(original))[1]
+        self.assert_unchanged(original, output, {0:0xff, 5:0xf0, 6:0xc, 7:0xf})
+        self.assertEqual(output[7] & 0xf, (counter + 1) % 15)
+        self.assertEqual(output[5] & 0xf0, 0x40)
+        self.assertEqual(output[6] & 0xc, 0)
         self.assertEqual(output[0], gwmcan.checksum(output[1:8], 0x2d))
 
   def test_no_transmission_without_stock_frames(self):
