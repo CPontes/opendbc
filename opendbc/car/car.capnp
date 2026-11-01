@@ -390,6 +390,7 @@ struct CarControl {
     cancel @0: Bool;
     resume @1: Bool;
     override @4: Bool;
+    decrease @5: Bool;  # one step down on the set speed, for cars that take it from a button
 
     deprecated :group {
       speedOverride @2: Float32;

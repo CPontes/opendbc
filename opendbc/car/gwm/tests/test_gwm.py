@@ -159,6 +159,47 @@ class TestGwmResume:
     self._stalk_frames(1, resume=False)
     assert self._stalk_frames(20, resume=False, cancel=True) == (0, 13)
 
+  def _minus(self, frames, decrease=True, cancel=False):
+    CC = structs.CarControl()
+    CC.enabled = True
+    CC.cruiseControl.decrease = decrease
+    CC.cruiseControl.cancel = cancel
+    CC = CC.as_reader()
+    presses = 0
+    for _ in range(frames):
+      for addr, dat, _bus in self.cc.update(CC, self.CS, 0)[1]:
+        if addr == 0xA1:
+          presses += bool(dat[6] & 0x04)
+    return presses
+
+  def test_minus_is_a_press_like_the_drivers_then_a_gap(self):
+    assert self._minus(13 + 35) == 13
+    assert self._minus(13 + 35) == 13
+
+  def test_minus_only_with_the_acc_driving_a_moving_car(self):
+    self.CS.acc_driving = False
+    assert self._minus(50) == 0
+    self.CS.acc_driving = True
+    self.CS.out.standstill = True
+    assert self._minus(50) == 0
+
+  def test_minus_stops_with_the_end_of_the_request(self):
+    assert self._minus(5) == 5
+    assert self._minus(50, decrease=False) == 0
+    assert self._minus(5) == 5  # a new press from the start, not the rest of the old one
+
+  def test_a_driver_button_stops_the_minus(self):
+    assert self._minus(5) == 5
+    self.CS.stalk_idle = False
+    assert self._minus(50) == 0
+
+  def test_cancel_wins_over_the_minus(self):
+    assert self._minus(50, cancel=True) == 0
+
+  def test_no_original_frame_no_minus(self):
+    self.CS.steer_and_ap_stalk_msg = None
+    assert self._minus(5) == 0
+
   def test_no_original_frame_no_cancel(self):
     self.CS.steer_and_ap_stalk_msg = None
     assert self._stalk_frames(5, resume=False, cancel=True) == (0, 0)

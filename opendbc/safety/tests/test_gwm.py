@@ -205,8 +205,8 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     self.assertFalse(self._rx(msg))
 
 
-class TestGwmAutoResume(common.SafetyTestBase):
-  SAFETY_PARAM = GwmSafetyFlags.AUTO_RESUME.value
+class GwmStalkTest(common.SafetyTestBase):
+  SAFETY_PARAM = 0
 
   def setUp(self):
     self.packer = CANPackerSafety(opendbc)
@@ -238,6 +238,9 @@ class TestGwmAutoResume(common.SafetyTestBase):
     self._rx_stalk(AP_ENABLE_COMMAND=1)
     self._rx_stalk()
     self.assertTrue(self.safety.get_controls_allowed())
+
+class TestGwmAutoResume(GwmStalkTest):
+  SAFETY_PARAM = GwmSafetyFlags.AUTO_RESUME.value
 
   def test_resume_frame_of_the_car_port_passes(self):
     self._engage()
@@ -358,6 +361,100 @@ class TestGwmAutoResume(common.SafetyTestBase):
   def test_nothing_held_before_the_first_frame(self):
     self._engage()
     self.safety.set_timer(0)
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
+
+
+class TestGwmAccMinus(GwmStalkTest):
+  SAFETY_PARAM = GwmSafetyFlags.ACC_MINUS.value
+
+  def _minus(self, **values):
+    return self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {"AP_DECREASE_SPEED_COMMAND": 1, **values}, fix_checksum=checksum))
+
+  def _driving(self):
+    self._engage()
+    self._speed(15)
+    self.safety.set_timer(100000000)
+
+  def test_passes_engaged_and_moving(self):
+    self._driving()
+    self.assertTrue(self._minus())
+
+  def test_frame_of_the_car_port_passes(self):
+    self._driving()
+    stock = self.packer.make_can_msg("STEER_AND_AP_STALK", 0, dict.fromkeys(STALK_BUTTONS, 1))[1]
+    addr, dat, bus = gwmcan.create_minus_command(self.packer, SimpleNamespace(camera=2), stock)
+    self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)))
+
+  def test_refused_without_the_option(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, 0)
+    self.safety.init_tests()
+    self._driving()
+    self.assertFalse(self._minus())
+
+  def test_refused_stopped(self):
+    self._engage()
+    self.safety.set_timer(100000000)
+    self.assertFalse(self._minus())
+
+  def test_refused_while_disengaged(self):
+    self._driving()
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._minus())
+
+  def test_never_the_plus_or_any_other_button(self):
+    self._driving()
+    for button in STALK_BUTTONS:
+      if button != "AP_DECREASE_SPEED_COMMAND":
+        self.assertFalse(self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {button: 1}, fix_checksum=checksum)), button)
+        self.assertFalse(self._minus(**{button: 1}), button)
+
+  def test_refused_with_gas_or_brake(self):
+    self._driving()
+    self._gas(10)
+    self.assertFalse(self._minus())
+    self._gas(0)
+    self.assertTrue(self._minus())
+    self._brake(1)
+    self.assertFalse(self._minus())
+
+  def test_refused_with_a_driver_button(self):
+    self._driving()
+    self._rx_stalk(AP_INCREASE_SPEED_COMMAND=1)
+    self.assertFalse(self._minus())
+    self._rx_stalk()
+    self.assertTrue(self._minus())
+
+  def test_a_budget_per_minute(self):
+    self._driving()
+    for _ in range(78):
+      self.assertTrue(self._minus())
+    self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 59999999)
+    self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 60000000)
+    self.assertTrue(self._minus())
+
+  def test_a_new_session_clears_the_budget(self):
+    self._driving()
+    for _ in range(78):
+      self._minus()
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self._driving()
+    self.assertTrue(self._minus())
+
+  def test_cancel_still_passes_after_the_budget_of_the_minus(self):
+    self._driving()
+    for _ in range(80):
+      self._minus()
+    self.assertTrue(self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {"AP_CANCEL_COMMAND": 1}, fix_checksum=checksum)))
+
+  def test_original_stalk_held_right_after_our_minus(self):
+    self._driving()
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
+    self.assertTrue(self._minus())
+    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0xA1))
+    self.safety.set_timer(100000000 + 15000)
     self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
 
 

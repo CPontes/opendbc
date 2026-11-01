@@ -19,6 +19,8 @@
 
 #define GWM_STALK_HOLD_US     15000U  // the original stalk frame stays out this long after each one of ours
 #define GWM_RESUME_MAX_FRAMES    20U  // per stop. A real pull is 10 to 16 frames
+#define GWM_MINUS_MAX_FRAMES     78U  // per window: 6 presses, 30 km/h down. It can't take the car off a road by itself
+#define GWM_MINUS_WINDOW_US  60000000U
 
 // always-on lateral: the brake pauses openpilot longitudinal only, steering stays
 // engaged until the cancel button. Longitudinal resumes on the next lever pull.
@@ -30,6 +32,11 @@ static bool gwm_brake_pressed_prev = false;
 static bool gwm_auto_resume = false;
 static bool gwm_stalk_button = false;
 static uint32_t gwm_resume_frames = 0U;
+
+// the minus button of the ACC: never the plus, and a budget of its own
+static bool gwm_acc_minus = false;
+static uint32_t gwm_minus_frames = 0U;
+static uint32_t gwm_minus_window_ts = 0U;
 
 // our stalk frame goes to the camera alone: the original stays out right after each one
 static bool gwm_stalk_tx_seen = false;
@@ -198,11 +205,21 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     bool driver_clear = !brake_pressed && !gas_pressed && !gwm_stalk_button;
     bool resume_allowed = resume && gwm_auto_resume && controls_allowed && gwm_long_allowed && !vehicle_moving && driver_clear &&
                           (gwm_resume_frames < GWM_RESUME_MAX_FRAMES);
-    violation |= !cancel && !resume_allowed;
+    bool minus = ((msg->data[5] & 0xF0U) == 0U) && ((msg->data[6] & 0x0CU) == 0x04U);
+    if (minus && (safety_get_ts_elapsed(microsecond_timer_get(), gwm_minus_window_ts) >= GWM_MINUS_WINDOW_US)) {
+      gwm_minus_frames = 0U;
+      gwm_minus_window_ts = microsecond_timer_get();
+    }
+    bool minus_allowed = minus && gwm_acc_minus && controls_allowed && gwm_long_allowed && vehicle_moving && driver_clear &&
+                         (gwm_minus_frames < GWM_MINUS_MAX_FRAMES);
+    violation |= !cancel && !resume_allowed && !minus_allowed;
     if (resume_allowed) {
       gwm_resume_frames += 1U;
     }
-    if (cancel || resume_allowed) {
+    if (minus_allowed) {
+      gwm_minus_frames += 1U;
+    }
+    if (cancel || resume_allowed || minus_allowed) {
       gwm_stalk_tx_seen = true;
       gwm_stalk_tx_ts = microsecond_timer_get();
     }
@@ -255,12 +272,16 @@ static safety_config gwm_init(uint16_t param) {
 
   const uint32_t FLAG_GWM_ALWAYS_ON_LATERAL = 2U;
   const uint32_t FLAG_GWM_AUTO_RESUME = 4U;
+  const uint32_t FLAG_GWM_ACC_MINUS = 8U;
   gwm_always_on_lateral = GET_FLAG(param, FLAG_GWM_ALWAYS_ON_LATERAL);
   gwm_auto_resume = GET_FLAG(param, FLAG_GWM_AUTO_RESUME);
+  gwm_acc_minus = GET_FLAG(param, FLAG_GWM_ACC_MINUS);
   gwm_long_allowed = false;
   gwm_brake_pressed_prev = false;
   gwm_stalk_button = false;
   gwm_resume_frames = 0U;
+  gwm_minus_frames = 0U;
+  gwm_minus_window_ts = 0U;
   gwm_stalk_tx_seen = false;
   gwm_stalk_tx_ts = 0U;
 

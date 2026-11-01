@@ -110,6 +110,10 @@ def create_resume_command(packer, CAN: CanBus, stock_data: bytes):
   return _create_stalk_command(packer, CAN, stock_data, "AP_ENABLE_COMMAND")
 
 
+def create_minus_command(packer, CAN: CanBus, stock_data: bytes):
+  return _create_stalk_command(packer, CAN, stock_data, "AP_DECREASE_SPEED_COMMAND")
+
+
 def create_hud_command(packer, CAN: CanBus, hud_stock_data: bytes, steer_required):
   # With no requested change, still refresh the same CRC as the original implementation.
   values = {"LKAS_STATE": 5} if steer_required else {}

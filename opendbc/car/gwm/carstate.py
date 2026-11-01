@@ -60,6 +60,7 @@ class CarState(CarStateBase):
     self.acc_driving = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 3
     self.stalk_idle = not any(cp.vl["STEER_AND_AP_STALK"][button] for button in STALK_BUTTONS)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"]  * CV.KPH_TO_MS
+    ret.cruiseState.speedCluster = ret.cruiseState.speed
     if not self.CP.openpilotLongitudinalControl:
       ret.cruiseState.speed = -1
 

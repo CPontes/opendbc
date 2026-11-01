@@ -431,6 +431,12 @@ class TestCommands:
     assert car.field(STALK, frame, "AP_CANCEL_COMMAND") == 1
     assert not any(car.field(STALK, frame, button) for button in buttons)
 
+  def test_set_speed_reads_the_acc(self):
+    car = Car()
+    ret = car.step(ACC={"ACC_SPEED_SELECTION": 70})
+    assert ret.cruiseState.speedCluster == pytest.approx(70 / 3.6)
+    assert ret.cruiseState.speed == -1  # the planner still doesn't take it as a target
+
   def test_acc_driving_reads_the_state(self):
     car = Car()
     car.step(ACC={"CRUISE_STATE_2": 3})
