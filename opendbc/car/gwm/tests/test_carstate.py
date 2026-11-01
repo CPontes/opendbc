@@ -439,9 +439,9 @@ class TestCommands:
 
   def test_acc_driving_reads_the_state(self):
     car = Car()
-    car.step(ACC={"CRUISE_STATE_2": 3})
+    assert car.step(ACC={"CRUISE_STATE_2": 3}).cruiseState.driving
     assert car.CI.CS.acc_driving
-    car.step(ACC={"CRUISE_STATE_2": 2})
+    assert not car.step(ACC={"CRUISE_STATE_2": 2}).cruiseState.driving
     assert not car.CI.CS.acc_driving
 
   def test_no_cancel_no_frame(self):

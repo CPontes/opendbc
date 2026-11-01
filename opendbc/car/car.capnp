@@ -244,6 +244,7 @@ struct CarState {
     available @2 :Bool;
     standstill @4 :Bool;
     nonAdaptive @5 :Bool;
+    driving @7 :Bool;  # the car's own ACC is in control right now. enabled can stay on with it paused
 
     deprecated :group {
       speedOffset @3 :Float32;

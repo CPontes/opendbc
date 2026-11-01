@@ -58,6 +58,7 @@ class CarState(CarStateBase):
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     self.acc_waiting = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 2
     self.acc_driving = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 3
+    ret.cruiseState.driving = self.acc_driving
     self.stalk_idle = not any(cp.vl["STEER_AND_AP_STALK"][button] for button in STALK_BUTTONS)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"]  * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = ret.cruiseState.speed
