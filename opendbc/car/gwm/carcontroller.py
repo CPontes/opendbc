@@ -13,8 +13,6 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
 RESUME_FRAMES = 13  # at 100 Hz: the driver's pulls last 0.10 to 0.16 s
-CANCEL_FRAMES = 13  # the driver's pushes last 0.13 s
-CANCEL_WAIT = 100  # frames, before pushing again if the ACC is still driving
 MINUS_FRAMES = 13  # the driver's presses last 0.09 to 0.18 s
 MINUS_GAP = 35  # frames between presses: the driver's are 0.35 s apart, and the set speed reads back at 10 Hz
 # Between these the last of gas or brake stays: a request around zero flipped them 76 times a minute. The Haval's own ACC
@@ -41,8 +39,6 @@ class CarController(CarControllerBase):
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
     self.resume_frames = 0
-    self.cancel_frames = 0
-    self.cancel_wait = 0
     self.minus_frames = 0
     self.minus_gap = 0
 
@@ -57,20 +53,8 @@ class CarController(CarControllerBase):
     lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
-    # A push like the driver's, only with the ACC driving a moving car. At a stop it holds the car and only leaves
-    # on a pull, and what a cancel does there was never seen. The panda keeps the original frame out meanwhile.
-    cancel = CC.cruiseControl.cancel and CS.acc_driving and not CS.out.standstill and CS.steer_and_ap_stalk_msg is not None
-    if not cancel:
-      self.cancel_frames = 0
-      self.cancel_wait = 0
-    elif self.cancel_wait > 0:
-      self.cancel_wait -= 1
-    else:
-      self.cancel_frames += 1
+    if CC.cruiseControl.cancel and CS.steer_and_ap_stalk_msg is not None:
       can_sends.append(gwmcan.create_cancel_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
-      if self.cancel_frames >= CANCEL_FRAMES:
-        self.cancel_frames = 0
-        self.cancel_wait = CANCEL_WAIT
 
     # One pull per request, like the driver's, only with the ACC waiting at a stop. The panda has the last word.
     resume = CC.cruiseControl.resume and not CC.cruiseControl.cancel
