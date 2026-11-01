@@ -86,7 +86,7 @@ class TestGwmResume:
     self.cc = CarInterface(CP).CC
     dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
     self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None, longitudinal_stock_data=None,
-                              steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"), acc_waiting=True, stalk_idle=True)
+                              steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"), acc_waiting=True, acc_driving=True, stalk_idle=True)
 
   def _stalk_frames(self, frames, resume=True, cancel=False):
     CC = structs.CarControl()
@@ -134,3 +134,31 @@ class TestGwmResume:
   def test_no_original_frame_no_pull(self):
     self.CS.steer_and_ap_stalk_msg = None
     assert self._stalk_frames(5) == (0, 0)
+
+  def test_cancel_is_a_push_like_the_drivers(self):
+    assert self._stalk_frames(13 + 100, resume=False, cancel=True) == (0, 13)
+
+  def test_cancel_pushes_again_if_the_acc_stayed_on(self):
+    assert self._stalk_frames(2 * 113, resume=False, cancel=True) == (0, 26)
+
+  def test_cancel_stops_when_the_acc_lets_go(self):
+    assert self._stalk_frames(5, resume=False, cancel=True) == (0, 5)
+    self.CS.acc_driving = False
+    assert self._stalk_frames(200, resume=False, cancel=True) == (0, 0)
+
+  def test_cancel_only_with_the_acc_driving(self):
+    self.CS.acc_driving = False
+    assert self._stalk_frames(50, resume=False, cancel=True) == (0, 0)
+
+  def test_cancel_never_lets_a_stopped_car_go(self):
+    self.CS.out.standstill = True
+    assert self._stalk_frames(50, resume=False, cancel=True) == (0, 0)
+
+  def test_a_new_request_is_a_new_push(self):
+    assert self._stalk_frames(20, resume=False, cancel=True) == (0, 13)
+    self._stalk_frames(1, resume=False)
+    assert self._stalk_frames(20, resume=False, cancel=True) == (0, 13)
+
+  def test_no_original_frame_no_cancel(self):
+    self.CS.steer_and_ap_stalk_msg = None
+    assert self._stalk_frames(5, resume=False, cancel=True) == (0, 0)

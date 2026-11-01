@@ -17,6 +17,7 @@ STALK = "STEER_AND_AP_STALK"
 CAM_MSGS = ("ACC", "STEER_CMD", "ACC_CMD", "LATERAL_STATE")
 STOCK_MSGS = (*CAM_MSGS, STALK, "RX_STEER_RELATED")  # always on the bus of a running car
 ACTIVE = {"CRUISE_STATE_2": 1}
+MOVING = {f"{pos}_WHEEL_SPEED": 50 for pos in ("FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT")}
 WHEELS = ("FRONT_LEFT_WHEEL_SPEED", "FRONT_RIGHT_WHEEL_SPEED", "REAR_LEFT_WHEEL_SPEED", "REAR_RIGHT_WHEEL_SPEED")
 
 
@@ -403,9 +404,14 @@ class TestFollowDistance:
 class TestCommands:
   CAMERA_BUS = 2
 
-  def test_cancel_reaches_the_camera_ahead_of_the_stock_frame(self):
+  @staticmethod
+  def driving(**stalk):
     car = Car()
-    car.step(**{STALK: {"COUNTER": 6, "STEERING_ANGLE": 12.5}})
+    car.step(ACC={"CRUISE_STATE_2": 3}, WHEEL_SPEEDS=MOVING, **{STALK: stalk})
+    return car
+
+  def test_cancel_reaches_the_camera_ahead_of_the_stock_frame(self):
+    car = self.driving(COUNTER=6, STEERING_ANGLE=12.5)
     frames = car.sent(car.apply(cancel=True), STALK)
     assert len(frames) == 1 and frames[0][2] == self.CAMERA_BUS
     assert car.field(STALK, frames[0], "AP_CANCEL_COMMAND") == 1
@@ -414,18 +420,23 @@ class TestCommands:
 
   def test_cancel_counter_wraps_like_the_stock_one(self):
     # measured: the stock counter goes 13, 14, 0. 15 never shows up in 1.46 million frames
-    car = Car()
-    car.step(**{STALK: {"COUNTER": 14}})
+    car = self.driving(COUNTER=14)
     assert car.field(STALK, car.sent(car.apply(cancel=True), STALK)[0], "COUNTER") == 0
 
   def test_cancel_carries_no_other_button(self):
     buttons = ("AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
                "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND")
-    car = Car()
-    car.step(**{STALK: dict.fromkeys(buttons, 1)})
+    car = self.driving(**dict.fromkeys(buttons, 1))
     frame = car.sent(car.apply(cancel=True), STALK)[0]
     assert car.field(STALK, frame, "AP_CANCEL_COMMAND") == 1
     assert not any(car.field(STALK, frame, button) for button in buttons)
+
+  def test_acc_driving_reads_the_state(self):
+    car = Car()
+    car.step(ACC={"CRUISE_STATE_2": 3})
+    assert car.CI.CS.acc_driving
+    car.step(ACC={"CRUISE_STATE_2": 2})
+    assert not car.CI.CS.acc_driving
 
   def test_no_cancel_no_frame(self):
     car = Car()

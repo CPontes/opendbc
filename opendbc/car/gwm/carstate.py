@@ -33,6 +33,7 @@ class CarState(CarStateBase):
     self.cancel_requested = False
     self.main_on = False
     self.acc_waiting = False
+    self.acc_driving = False
     self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
 
@@ -56,6 +57,7 @@ class CarState(CarStateBase):
 
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     self.acc_waiting = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 2
+    self.acc_driving = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 3
     self.stalk_idle = not any(cp.vl["STEER_AND_AP_STALK"][button] for button in STALK_BUTTONS)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"]  * CV.KPH_TO_MS
     if not self.CP.openpilotLongitudinalControl:

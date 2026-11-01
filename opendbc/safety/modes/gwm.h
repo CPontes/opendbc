@@ -30,7 +30,10 @@ static bool gwm_brake_pressed_prev = false;
 static bool gwm_auto_resume = false;
 static bool gwm_stalk_button = false;
 static uint32_t gwm_resume_frames = 0U;
-static uint32_t gwm_resume_ts = 0U;
+
+// our stalk frame goes to the camera alone: the original stays out right after each one
+static bool gwm_stalk_tx_seen = false;
+static uint32_t gwm_stalk_tx_ts = 0U;
 
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
@@ -198,7 +201,10 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     violation |= !cancel && !resume_allowed;
     if (resume_allowed) {
       gwm_resume_frames += 1U;
-      gwm_resume_ts = microsecond_timer_get();
+    }
+    if (cancel || resume_allowed) {
+      gwm_stalk_tx_seen = true;
+      gwm_stalk_tx_ts = microsecond_timer_get();
     }
   }
 
@@ -209,11 +215,11 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
 }
 
 static bool gwm_fwd_hook(int bus_num, int addr) {
-  // Our pull alternating with the original stalk frame was never seen working: the camera gets ours alone.
+  // Our frame alternating with the original stalk frame was never seen working: the camera gets ours alone.
   // It lets go by itself if we stop sending, and a driver's button always goes through.
   bool block_msg = false;
-  if ((bus_num == (int)GWM_MAIN_BUS) && (addr == (int)GWM_ADAS_ACTIVATION) && (gwm_resume_frames > 0U) && !gwm_stalk_button) {
-    block_msg = safety_get_ts_elapsed(microsecond_timer_get(), gwm_resume_ts) < GWM_STALK_HOLD_US;
+  if ((bus_num == (int)GWM_MAIN_BUS) && (addr == (int)GWM_ADAS_ACTIVATION) && gwm_stalk_tx_seen && !gwm_stalk_button) {
+    block_msg = safety_get_ts_elapsed(microsecond_timer_get(), gwm_stalk_tx_ts) < GWM_STALK_HOLD_US;
   }
   return block_msg;
 }
@@ -255,7 +261,8 @@ static safety_config gwm_init(uint16_t param) {
   gwm_brake_pressed_prev = false;
   gwm_stalk_button = false;
   gwm_resume_frames = 0U;
-  gwm_resume_ts = 0U;
+  gwm_stalk_tx_seen = false;
+  gwm_stalk_tx_ts = 0U;
 
   bool gwm_longitudinal = false;
 #ifdef ALLOW_DEBUG

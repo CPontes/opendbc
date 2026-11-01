@@ -120,6 +120,8 @@ class TestGwmPreservation(unittest.TestCase):
     specs = [(0x12b, 64, 2), (0x147, 64, 0), (0x143, 64, 2), (0x23d, 64, 2), (0xa1, 8, 0)]
     original = {addr:rng.randbytes(size) for addr, size, _ in specs}
     ci.update([[1_000_000, [(addr, original[addr], bus) for addr, _, bus in specs]]])
+    ci.CS.acc_driving = True
+    ci.CS.out.standstill = False
     cc = structs.CarControl()
     cc.cruiseControl.cancel = True
     _, frames = ci.CC.update(cc.as_reader(), ci.CS, 0)
