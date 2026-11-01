@@ -9,6 +9,7 @@ from opendbc.car.gwm.values import CarControllerParams
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
+RESUME_FRAMES = 13  # at 100 Hz: the driver's pulls last 0.10 to 0.16 s
 
 
 class CarController(CarControllerBase):
@@ -20,6 +21,8 @@ class CarController(CarControllerBase):
     self.lat_active = False  # what the EPS was last asked to do, not just what openpilot wants
     self.CAN = gwmcan.CanBus(CP)
     self.accel = 0.0
+    self.resume_prev = False
+    self.resume_frames = 0
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -32,6 +35,17 @@ class CarController(CarControllerBase):
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     if CC.cruiseControl.cancel and CS.steer_and_ap_stalk_msg is not None:
       can_sends.append(gwmcan.create_cancel_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
+
+    # One pull per request, like the driver's, only with the ACC waiting at a stop. The panda has the last word.
+    resume = CC.cruiseControl.resume and not CC.cruiseControl.cancel
+    if resume and not self.resume_prev and CS.acc_waiting:
+      self.resume_frames = RESUME_FRAMES
+    self.resume_prev = resume
+    if not resume or not CS.stalk_idle or CS.steer_and_ap_stalk_msg is None:
+      self.resume_frames = 0
+    if self.resume_frames > 0:
+      self.resume_frames -= 1
+      can_sends.append(gwmcan.create_resume_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
 
     if self.frame % 2 == 0: # 50 Hz
       # Track the actual transmitted request; no original means no replacement request.

@@ -78,3 +78,59 @@ class TestGwmSteerFault:
 
   def test_no_fault_without_a_request(self):
     assert not self._fault(False)
+
+
+class TestGwmResume:
+  def setup_method(self):
+    CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
+    self.cc = CarInterface(CP).CC
+    dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
+    self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None, longitudinal_stock_data=None,
+                              steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"), acc_waiting=True, stalk_idle=True)
+
+  def _stalk_frames(self, frames, resume=True, cancel=False):
+    CC = structs.CarControl()
+    CC.enabled = True
+    CC.cruiseControl.resume = resume
+    CC.cruiseControl.cancel = cancel
+    CC = CC.as_reader()
+    enable = other = 0
+    for _ in range(frames):
+      for addr, dat, _bus in self.cc.update(CC, self.CS, 0)[1]:
+        if addr == 0xA1:
+          enable += bool(dat[5] & 0x80)
+          other += bool(dat[5] & 0x40)
+    return enable, other
+
+  def test_one_pull_per_request(self):
+    assert self._stalk_frames(50) == (13, 0)
+
+  def test_each_request_is_one_pull(self):
+    self._stalk_frames(50)
+    self._stalk_frames(1, resume=False)
+    assert self._stalk_frames(50) == (13, 0)
+
+  def test_only_with_the_acc_waiting(self):
+    self.CS.acc_waiting = False
+    assert self._stalk_frames(20) == (0, 0)
+    self.CS.acc_waiting = True
+    assert self._stalk_frames(20) == (0, 0)  # the request was missed, it isn't taken late
+
+  def test_a_driver_button_ends_the_pull(self):
+    assert self._stalk_frames(5) == (5, 0)
+    self.CS.stalk_idle = False
+    assert self._stalk_frames(20) == (0, 0)
+    self.CS.stalk_idle = True
+    assert self._stalk_frames(20) == (0, 0)
+
+  def test_the_end_of_the_request_ends_the_pull(self):
+    assert self._stalk_frames(5) == (5, 0)
+    assert self._stalk_frames(20, resume=False) == (0, 0)
+
+  def test_cancel_wins(self):
+    assert self._stalk_frames(5) == (5, 0)
+    assert self._stalk_frames(5, cancel=True) == (0, 5)
+
+  def test_no_original_frame_no_pull(self):
+    self.CS.steer_and_ap_stalk_msg = None
+    assert self._stalk_frames(5) == (0, 0)

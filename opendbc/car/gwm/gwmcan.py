@@ -86,10 +86,10 @@ def create_wheel_touch(packer, CAN: CanBus, eps_stock_data: bytes, ea_simulated_
   return 0x147, dat, CAN.camera
 
 
-def create_cancel_command(packer, CAN: CanBus, stock_data: bytes):
-  # Cancel and no other button, whatever the driver is pressing: the panda blocks anything else.
+def _create_stalk_command(packer, CAN: CanBus, stock_data: bytes, button: str):
+  # This button and no other, whatever the driver is pressing: the panda blocks anything else.
   values = {
-    "AP_CANCEL_COMMAND": 1,
+    "AP_CANCEL_COMMAND": 0,
     "AP_ENABLE_COMMAND": 0,
     "AP_INCREASE_SPEED_COMMAND": 0,
     "AP_DECREASE_SPEED_COMMAND": 0,
@@ -97,9 +97,17 @@ def create_cancel_command(packer, CAN: CanBus, stock_data: bytes):
     "AP_REDUCE_DISTANCE_COMMAND": 0,
     "COUNTER": (_get_value(packer, "STEER_AND_AP_STALK", stock_data, "COUNTER") + 1) % (STALK_MAX_COUNTER + 1),
   }
-  dat = _update_fields(packer, "STEER_AND_AP_STALK", stock_data, values)
+  dat = _update_fields(packer, "STEER_AND_AP_STALK", stock_data, values | {button: 1})
   dat = _update_fields(packer, "STEER_AND_AP_STALK", dat, {"CRC_X2D": checksum(dat[1:8], 0x2D)})
   return 0xA1, dat, CAN.camera
+
+
+def create_cancel_command(packer, CAN: CanBus, stock_data: bytes):
+  return _create_stalk_command(packer, CAN, stock_data, "AP_CANCEL_COMMAND")
+
+
+def create_resume_command(packer, CAN: CanBus, stock_data: bytes):
+  return _create_stalk_command(packer, CAN, stock_data, "AP_ENABLE_COMMAND")
 
 
 def create_hud_command(packer, CAN: CanBus, hud_stock_data: bytes, steer_required):

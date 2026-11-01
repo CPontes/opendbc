@@ -17,11 +17,20 @@
 #define GWM_MAIN_BUS 0U
 #define GWM_CAMERA_BUS  2U
 
+#define GWM_STALK_HOLD_US     15000U  // the original stalk frame stays out this long after each one of ours
+#define GWM_RESUME_MAX_FRAMES    20U  // per stop. A real pull is 10 to 16 frames
+
 // always-on lateral: the brake pauses openpilot longitudinal only, steering stays
 // engaged until the cancel button. Longitudinal resumes on the next lever pull.
 static bool gwm_always_on_lateral = false;
 static bool gwm_long_allowed = false;
 static bool gwm_brake_pressed_prev = false;
+
+// auto resume: one pull of the stalk per stop, with openpilot engaged and no pedal or button in use
+static bool gwm_auto_resume = false;
+static bool gwm_stalk_button = false;
+static uint32_t gwm_resume_frames = 0U;
+static uint32_t gwm_resume_ts = 0U;
 
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
@@ -84,6 +93,9 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
       float speed = (float)((fr + rr + rl + fl) / 4.0f * 0.05924739 * KPH_TO_MS);
       vehicle_moving = speed > 0.0f;
       UPDATE_VEHICLE_SPEED(speed);
+      if (vehicle_moving) {
+        gwm_resume_frames = 0U;
+      }
     }
 
     if (msg->addr == GWM_BRAKE) {
@@ -111,6 +123,7 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
 
     // state machine to enter and exit controls for button enabling
     if (msg->addr == GWM_ADAS_ACTIVATION) {
+      gwm_stalk_button = ((msg->data[5] & 0xF0U) != 0U) || ((msg->data[6] & 0x0CU) != 0U);
       bool cruise_button = GET_BIT(msg, 47U);
       // enter controls on the rising edge of set or resume
       if (cruise_button && !cruise_button_prev) {
@@ -174,9 +187,19 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // the stalk only goes out to cancel: no enable, no speed or distance button
+  // the stalk only goes out to cancel or to resume from a stop: no speed or distance button
   if (msg->addr == GWM_ADAS_ACTIVATION) {
-    violation |= ((msg->data[5] & 0xF0U) != 0x40U) || ((msg->data[6] & 0x0CU) != 0U);
+    bool other_button = (msg->data[6] & 0x0CU) != 0U;
+    bool cancel = ((msg->data[5] & 0xF0U) == 0x40U) && !other_button;
+    bool resume = ((msg->data[5] & 0xF0U) == 0x80U) && !other_button;
+    bool driver_clear = !brake_pressed && !gas_pressed && !gwm_stalk_button;
+    bool resume_allowed = resume && gwm_auto_resume && controls_allowed && gwm_long_allowed && !vehicle_moving && driver_clear &&
+                          (gwm_resume_frames < GWM_RESUME_MAX_FRAMES);
+    violation |= !cancel && !resume_allowed;
+    if (resume_allowed) {
+      gwm_resume_frames += 1U;
+      gwm_resume_ts = microsecond_timer_get();
+    }
   }
 
   if (violation) {
@@ -185,16 +208,26 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static bool gwm_fwd_hook(int bus_num, int addr) {
+  // Our pull alternating with the original stalk frame was never seen working: the camera gets ours alone.
+  // It lets go by itself if we stop sending, and a driver's button always goes through.
+  bool block_msg = false;
+  if ((bus_num == (int)GWM_MAIN_BUS) && (addr == (int)GWM_ADAS_ACTIVATION) && (gwm_resume_frames > 0U) && !gwm_stalk_button) {
+    block_msg = safety_get_ts_elapsed(microsecond_timer_get(), gwm_resume_ts) < GWM_STALK_HOLD_US;
+  }
+  return block_msg;
+}
+
 static safety_config gwm_init(uint16_t param) {
   static const CanMsg GWM_TX_MSGS[] = {
-    {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
+    {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel and resume commands
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_HUD, GWM_MAIN_BUS, 64, .check_relay = true}, // HUD and dashboard
   };
 
   static const CanMsg GWM_LONG_TX_MSGS[] = {
-    {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel command
+    {GWM_ADAS_ACTIVATION, GWM_CAMERA_BUS, 8, .check_relay = false}, // Cancel and resume commands
     {GWM_RX_STEER_RELATED, GWM_CAMERA_BUS, 64, .check_relay = true}, // EPS steering feedback to camera
     {GWM_STEER_CMD, GWM_MAIN_BUS, 64, .check_relay = true}, // Steering command
     {GWM_LONG_CONTROL, GWM_MAIN_BUS, 64, .check_relay = true}, // Longitudinal control message from camera
@@ -215,9 +248,14 @@ static safety_config gwm_init(uint16_t param) {
   };
 
   const uint32_t FLAG_GWM_ALWAYS_ON_LATERAL = 2U;
+  const uint32_t FLAG_GWM_AUTO_RESUME = 4U;
   gwm_always_on_lateral = GET_FLAG(param, FLAG_GWM_ALWAYS_ON_LATERAL);
+  gwm_auto_resume = GET_FLAG(param, FLAG_GWM_AUTO_RESUME);
   gwm_long_allowed = false;
   gwm_brake_pressed_prev = false;
+  gwm_stalk_button = false;
+  gwm_resume_frames = 0U;
+  gwm_resume_ts = 0U;
 
   bool gwm_longitudinal = false;
 #ifdef ALLOW_DEBUG
@@ -236,6 +274,7 @@ const safety_hooks gwm_hooks = {
   .init = gwm_init,
   .rx = gwm_rx_hook,
   .tx = gwm_tx_hook,
+  .fwd = gwm_fwd_hook,
   .get_counter = gwm_get_counter,
   .get_checksum = gwm_get_checksum,
   .compute_checksum = gwm_compute_checksum,

@@ -24,6 +24,7 @@ class CarControllerParams:
 class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
   ALWAYS_ON_LATERAL = 2  # brake pauses longitudinal only, steering stays engaged until cancel
+  AUTO_RESUME = 4  # openpilot may pull the stalk once per stop
 
 
 @dataclass

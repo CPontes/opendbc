@@ -476,3 +476,23 @@ class TestParams:
     on = CarInterface.get_params(CAR.GWM_HAVAL_H6, gen_empty_fingerprint(), [], True, False, False)
     assert not off.openpilotLongitudinalControl and not off.safetyConfigs[-1].safetyParam & GwmSafetyFlags.LONG_CONTROL.value
     assert on.openpilotLongitudinalControl and on.safetyConfigs[-1].safetyParam & GwmSafetyFlags.LONG_CONTROL.value
+
+
+class TestResumeInputs:
+  def test_acc_waiting(self):
+    car = Car()
+    car.step(ACC={"CRUISE_STATE_2": 3})
+    assert not car.CI.CS.acc_waiting
+    car.step(ACC={"CRUISE_STATE_2": 2})
+    assert car.CI.CS.acc_waiting
+
+  def test_stalk_idle(self):
+    car = Car()
+    car.step()
+    assert car.CI.CS.stalk_idle
+    for button in ("AP_CANCEL_COMMAND", "AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
+                   "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND"):
+      car.step(STEER_AND_AP_STALK={button: 1})
+      assert not car.CI.CS.stalk_idle, button
+      car.step(STEER_AND_AP_STALK={button: 0})
+      assert car.CI.CS.stalk_idle, button

@@ -8,6 +8,9 @@ ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 
+STALK_BUTTONS = ("AP_CANCEL_COMMAND", "AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
+                 "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND")
+
 
 def get_stock_data(parser, name):
   # Never synthesize a stock frame from zero-initialized signals or a truncated payload.
@@ -29,6 +32,8 @@ class CarState(CarStateBase):
     self.lever_pull_valid = False
     self.cancel_requested = False
     self.main_on = False
+    self.acc_waiting = False
+    self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
 
   def update(self, can_parsers) -> structs.CarState:
@@ -50,6 +55,8 @@ class CarState(CarStateBase):
     )
 
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
+    self.acc_waiting = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 2
+    self.stalk_idle = not any(cp.vl["STEER_AND_AP_STALK"][button] for button in STALK_BUTTONS)
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"]  * CV.KPH_TO_MS
     if not self.CP.openpilotLongitudinalControl:
       ret.cruiseState.speed = -1
