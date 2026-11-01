@@ -23,6 +23,7 @@ class CarInterface(CarInterfaceBase):
   def apply(self, CC, now_nanos):
     hud_control = CC.hudControl
     self.current_personality = hud_control.leadDistanceBars
+    self.CS.cancel_requested = CC.cruiseControl.cancel
     return super().apply(CC, now_nanos)
 
   def update(self, can_packets):

@@ -114,7 +114,6 @@ class TestEngagement:
     car.release()
     assert not car.step().cruiseState.enabled
 
-  @pytest.mark.xfail(strict=True, reason="STATE-01: lever released on the same frame cancel ends keeps it engaged")
   def test_cancel_wins_over_the_lever(self):
     car = Car(self.safety_param)
     car.lever()
@@ -122,6 +121,44 @@ class TestEngagement:
     car.step(**{STALK: {"AP_CANCEL_COMMAND": 1}})
     car.step(**{STALK: {"AP_CANCEL_COMMAND": 1, "AP_ENABLE_COMMAND": 0}})
     assert not car.cancel(0).cruiseState.enabled
+
+  def test_cancel_during_the_pull_is_not_an_engage(self):
+    # the panda dropped this pull, engaging here leaves every torque command blocked
+    car = Car(self.safety_param)
+    car.pull()
+    car.cancel()
+    car.cancel(0)
+    assert not car.release().cruiseState.enabled
+
+  def test_cancel_with_the_pull_is_not_an_engage(self):
+    car = Car(self.safety_param)
+    car.step(**{STALK: {"AP_CANCEL_COMMAND": 1, "AP_ENABLE_COMMAND": 1}})
+    car.cancel(0)
+    assert not car.release().cruiseState.enabled
+
+  def test_pull_after_a_cancelled_pull_engages(self):
+    car = Car(self.safety_param)
+    car.pull()
+    car.cancel()
+    car.cancel(0)
+    car.release()
+    assert car.lever().cruiseState.enabled
+
+  def test_pull_engages_again_after_openpilot_dropped_out(self):
+    # 6 pulls went nowhere for 52 s in the logs: enabled never fell, so openpilot saw no new engage
+    car = Car(self.safety_param)
+    car.lever()
+    car.apply(cancel=True)
+    assert car.step().cruiseState.enabled
+    assert not car.pull().cruiseState.enabled
+    ret = car.release()
+    assert ret.cruiseState.enabled and not resumes(ret)
+
+  def test_pull_while_engaged_stays_engaged(self):
+    car = Car(self.safety_param)
+    car.lever()
+    assert car.pull().cruiseState.enabled
+    assert car.release().cruiseState.enabled
 
   def test_engages_again_after_cancel(self):
     car = Car(self.safety_param)
@@ -132,6 +169,36 @@ class TestEngagement:
 
 
 class TestBrake:
+  def test_brake_during_the_pull_is_not_an_engage(self):
+    # the foot leaving the brake while the lever is pulled: 2 of 114 pulls in the logs, panda refused both
+    car = Car()
+    car.brake()
+    car.pull()
+    car.brake(0)
+    ret = car.release()
+    assert not ret.brakePressed and not ret.cruiseState.enabled
+
+  def test_brake_pressed_inside_the_pull_is_not_an_engage(self):
+    car = Car()
+    car.pull()
+    car.brake()
+    car.brake(0)
+    assert not car.release().cruiseState.enabled
+
+  def test_brake_one_frame_before_the_pull_is_not_an_engage(self):
+    # the panda reads the stalk while the brake frame is still on its way
+    car = Car()
+    car.brake()
+    car.step(BRAKE2={"PEDAL_BRAKE_PRESSED": 0}, **{STALK: {"AP_ENABLE_COMMAND": 1}})
+    assert not car.release().cruiseState.enabled
+
+  def test_pull_after_the_brake_engages(self):
+    car = Car()
+    car.brake()
+    car.brake(0)
+    car.step()
+    assert car.lever().cruiseState.enabled
+
   def test_brake_disengages(self):
     car = Car()
     car.lever()

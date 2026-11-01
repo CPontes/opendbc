@@ -91,6 +91,20 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
     self._rx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, {"AP_CANCEL_COMMAND": 1}, fix_checksum=checksum))
     self.assertFalse(self.safety.get_controls_allowed())
 
+  def test_new_pull_after_openpilot_dropped_out(self):
+    def stalk(enable):
+      self._rx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, {"AP_ENABLE_COMMAND": enable}, fix_checksum=checksum))
+
+    stalk(1)
+    stalk(0)
+    self.assertTrue(self.safety.get_controls_allowed())
+    # no cancel and no brake: only the heartbeat took controls away, so nothing cleared the lever state
+    self.safety.set_controls_allowed(False)
+    stalk(0)
+    self.assertFalse(self.safety.get_controls_allowed())
+    stalk(1)
+    self.assertTrue(self.safety.get_controls_allowed())
+
   def _torque_meas_msg(self, torque):
     # 11-bit signed signal clip to not produce errors on test
     torque_signal = dbc.name_to_msg["RX_STEER_RELATED"].sigs["B_RX_EPS_TORQUE"]

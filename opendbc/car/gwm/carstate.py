@@ -26,6 +26,8 @@ class CarState(CarStateBase):
 
     self.is_activation_lever_pulled = False
     self.prev_activation_lever_pulled = False
+    self.lever_pull_valid = False
+    self.cancel_requested = False
     self.main_on = False
     self.steer_fault_temporary_counter = 0
 
@@ -87,14 +89,24 @@ class CarState(CarStateBase):
 
     # with always-on lateral the brake only pauses longitudinal (handled in selfdrived), it doesn't disengage
     always_on_lateral = bool(self.CP.safetyConfigs[-1].safetyParam & GwmSafetyFlags.ALWAYS_ON_LATERAL)
-    if cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"] or (ret.brakePressed and not always_on_lateral):
+    # the last frame too: the panda reads the stalk mid-update, it may not have seen the brake released yet
+    brake_pressed = ret.brakePressed or self.out.brakePressed
+    disengage = cp.vl["STEER_AND_AP_STALK"]["AP_CANCEL_COMMAND"] or (brake_pressed and not always_on_lateral)
+    if disengage:
       self.main_on = False
     self.is_activation_lever_pulled = bool(cp.vl["STEER_AND_AP_STALK"]["AP_ENABLE_COMMAND"])
+    lever_pressed = self.is_activation_lever_pulled and not self.prev_activation_lever_pulled
     lever_released = not self.is_activation_lever_pulled and self.prev_activation_lever_pulled
-    if lever_released and self.main_on and always_on_lateral:
-      # lever pulled while engaged: resume longitudinal after a brake pause
-      ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise)]
-    if lever_released and not self.main_on:
+    # The panda engages on the pull and drops it on cancel or brake, this engages on the release. A pull that
+    # fails the panda's rule can't count here, or openpilot shows engaged with every torque command blocked.
+    self.lever_pull_valid = (self.lever_pull_valid or lever_pressed) and not disengage
+    # openpilot dropped out on its own (fault, gear, monitoring) and nothing but cancel or brake clears main_on
+    if lever_pressed and self.cancel_requested:
+      self.main_on = False
+    if lever_released and self.lever_pull_valid:
+      if self.main_on and always_on_lateral:
+        # lever pulled while engaged: resume longitudinal after a brake pause
+        ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise)]
       self.main_on = True
     self.prev_activation_lever_pulled = self.is_activation_lever_pulled
 

@@ -116,6 +116,8 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
       if (cruise_button && !cruise_button_prev) {
         acc_main_on = true;
         gwm_long_allowed = true;
+        // every pull is a new engage: openpilot may have dropped out with no cancel or brake to clear acc_main_on
+        cruise_engaged_prev = false;
       }
       // exit controls once cancel is pressed
       bool cancel_button = GET_BIT(msg, 46U);
