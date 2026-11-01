@@ -7,6 +7,10 @@ from opendbc.car.gwm.values import GwmSafetyFlags
 ButtonType = structs.CarState.ButtonEvent.Type
 TransmissionType = structs.CarParams.TransmissionType
 
+# The car has 4 follow distances and openpilot 3 personalities: both farthest distances take the farthest bars.
+FOLLOW_DISTANCE_BARS = {1: 1, 2: 2, 3: 3, 4: 3}
+FOLLOW_DISTANCE_WAIT = 50  # frames for selfdrived to answer a press with new bars
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
@@ -18,7 +22,7 @@ class CarInterface(CarInterfaceBase):
       self.steer_fault_temporary_counter = 0
       self.current_personality = 0
       self.pcm_follow_distance = 0
-      self.press_gac_button = False
+      self.follow_distance_wait = 0
 
   def apply(self, CC, now_nanos):
     hud_control = CC.hudControl
@@ -39,16 +43,22 @@ class CarInterface(CarInterfaceBase):
 
     ret = super().update(can_packets)
     ret.steerFaultTemporary |= self.steer_fault_temporary_counter > 100
-    if (self.pcm_follow_distance == 4 and self.current_personality != 3) or \
-       (self.pcm_follow_distance == 3 and self.current_personality != 3) or \
-       (self.pcm_follow_distance == 2 and self.current_personality != 2) or \
-       (self.pcm_follow_distance == 1 and self.current_personality != 1):
-      self.press_gac_button = not self.press_gac_button
     # copy first: setting the field wipes the old list, an event from CarState would come out as unknown
     car_state_events = [be.copy() for be in ret.buttonEvents]
-    ret.buttonEvents = [*car_state_events, *create_button_events(self.press_gac_button, True, {1: ButtonType.gapAdjustCruise})]
+    ret.buttonEvents = [*car_state_events, *self.follow_distance_events()]
 
     return ret
+
+  def follow_distance_events(self):
+    # Only openpilot longitudinal has personalities. Each release is one step, so press once and wait for the bars.
+    self.follow_distance_wait = max(self.follow_distance_wait - 1, 0)
+    bars = FOLLOW_DISTANCE_BARS.get(self.pcm_follow_distance)
+    if not self.CP.openpilotLongitudinalControl or bars is None or self.current_personality == 0:
+      return []
+    if bars == self.current_personality or self.follow_distance_wait > 0:
+      return []
+    self.follow_distance_wait = FOLLOW_DISTANCE_WAIT
+    return create_button_events(0, 1, {1: ButtonType.gapAdjustCruise})
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:

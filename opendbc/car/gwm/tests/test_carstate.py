@@ -8,7 +8,7 @@ import pytest
 
 from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, gen_empty_fingerprint, structs
-from opendbc.car.gwm.interface import CarInterface
+from opendbc.car.gwm.interface import CarInterface, FOLLOW_DISTANCE_WAIT
 from opendbc.car.gwm.values import CAR, DBC, GwmSafetyFlags
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -334,33 +334,70 @@ class TestFaults:
     assert not car.step(frames=100).steerFaultTemporary
 
 
+class Selfdrived:
+  """What openpilot does with a distance release, a few frames later: one personality down, 3 bars after 1."""
+  LATENCY = 4
+
+  def __init__(self, bars):
+    self.bars = bars
+    self.pending = []
+
+  def step(self, ret):
+    releases = [be for be in ret.buttonEvents if be.type == ButtonType.gapAdjustCruise and not be.pressed]
+    self.pending = [left - 1 for left in self.pending] + [self.LATENCY] * len(releases)
+    self.bars = (self.bars - 2) % 3 + 1 if 0 in self.pending else self.bars
+    self.pending = [left for left in self.pending if left > 0]
+    return len(releases)
+
+
 class TestFollowDistance:
-  @pytest.mark.parametrize("distance,personality", [(1, 1), (2, 2), (3, 3), (4, 3)])
-  def test_no_press_when_they_agree(self, distance, personality):
-    car = Car()
-    car.CI.current_personality = personality
-    states = set()
-    for _ in range(5):
-      car.step(ACC={"CAR_DISTANCE_SELECTION": distance})
-      states.add(car.CI.press_gac_button)
-    assert states == {False}
+  def run(self, distance, bars, frames=300):
+    car = Car(long=True)
+    op = Selfdrived(bars)
+    presses = []
+    for _ in range(frames):
+      car.CI.current_personality = op.bars
+      presses.append(op.step(car.step(ACC={"CAR_DISTANCE_SELECTION": distance})))
+    return op.bars, presses
 
-  @pytest.mark.parametrize("distance,personality", [(1, 2), (2, 1), (3, 2), (4, 1)])
-  def test_presses_until_they_agree(self, distance, personality):
-    car = Car()
-    car.CI.current_personality = personality
-    states, events = set(), []
-    for _ in range(4):
-      events += car.step(ACC={"CAR_DISTANCE_SELECTION": distance}).buttonEvents
-      states.add(car.CI.press_gac_button)
-    assert states == {True, False}
-    assert events and all(be.type == ButtonType.gapAdjustCruise for be in events)
+  @pytest.mark.parametrize("distance,bars", [(1, 1), (2, 2), (3, 3), (4, 3)])
+  def test_no_press_when_they_agree(self, distance, bars):
+    assert self.run(distance, bars) == (bars, [0] * 300)
 
-  @pytest.mark.xfail(strict=True, reason="STATE-01: a button release is reported on every frame the press state is False")
-  def test_no_button_event_without_a_press(self):
+  @pytest.mark.parametrize("distance,target", [(1, 1), (2, 2), (3, 3), (4, 3)])
+  @pytest.mark.parametrize("bars", [1, 2, 3])
+  def test_reaches_the_distance_and_stops(self, distance, target, bars):
+    end, presses = self.run(distance, bars)
+    assert end == target
+    assert sum(presses) == (bars - target) % 3
+
+  def test_one_press_per_step(self):
+    # a press every frame runs past the target before the first one is answered
+    _, presses = self.run(1, 3)
+    at = [i for i, n in enumerate(presses) if n]
+    assert all(presses[i] == 1 for i in at) and at[1] - at[0] >= FOLLOW_DISTANCE_WAIT
+
+  def test_follows_a_change_on_the_car(self):
+    car = Car(long=True)
+    op = Selfdrived(1)
+    for distance in (1, 4, 2):
+      for _ in range(300):
+        car.CI.current_personality = op.bars
+        op.step(car.step(ACC={"CAR_DISTANCE_SELECTION": distance}))
+      assert op.bars == min(distance, 3)
+
+  def test_unknown_distance_is_left_alone(self):
+    # 0 shows up for a moment at start up
+    assert self.run(0, 2) == (2, [0] * 300)
+
+  def test_waits_for_the_first_bars(self):
+    car = Car(long=True)
+    assert not any(car.step(ACC={"CAR_DISTANCE_SELECTION": 2}).buttonEvents for _ in range(5))
+
+  def test_no_press_without_openpilot_longitudinal(self):
     car = Car()
-    car.CI.current_personality = 3
-    assert not car.step(frames=5, ACC={"CAR_DISTANCE_SELECTION": 3}).buttonEvents
+    car.CI.current_personality = 1
+    assert not any(car.step(ACC={"CAR_DISTANCE_SELECTION": 4}).buttonEvents for _ in range(120))
 
 
 class TestCommands:
