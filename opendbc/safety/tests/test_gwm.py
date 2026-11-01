@@ -434,6 +434,30 @@ class TestGwmAccMinus(GwmStalkTest):
     self.safety.set_timer(100000000 + 60000000)
     self.assertTrue(self._minus())
 
+  def test_the_budget_counts_any_minute_not_a_fixed_window(self):
+    self._driving()
+    self.assertTrue(self._minus())
+    self.safety.set_timer(100000000 + 59000000)
+    for _ in range(77):
+      self.assertTrue(self._minus())
+    self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 60000000)  # a minute after the first, one second after the last
+    self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 59000000 + 59999999)
+    self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 59000000 + 60000000)
+    self.assertTrue(self._minus())
+
+  def test_refused_frames_do_not_keep_the_budget_away(self):
+    self._driving()
+    for _ in range(78):
+      self.assertTrue(self._minus())
+    for i in range(10):
+      self.safety.set_timer(100000000 + i * 5000000)
+      self.assertFalse(self._minus())
+    self.safety.set_timer(100000000 + 60000000)
+    self.assertTrue(self._minus())
+
   def test_a_new_session_clears_the_budget(self):
     self._driving()
     for _ in range(78):
