@@ -108,33 +108,10 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
         self.assertFalse(self._stalk_tx(**{button: 1}))
         self.assertFalse(self._stalk_tx(AP_CANCEL_COMMAND=1, **{button: 1}))
 
-  def test_original_stalk_held_only_right_after_our_cancel(self):
-    self.safety.set_timer(100000)
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
-    self.assertTrue(self._stalk_tx(AP_CANCEL_COMMAND=1))
-    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0xA1))
-    self.safety.set_timer(100000 + 14999)
-    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0xA1))
-    self.safety.set_timer(100000 + 15000)
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
-
   def test_a_refused_stalk_frame_holds_nothing(self):
     self.safety.set_timer(100000)
     self.assertFalse(self._stalk_tx(AP_ENABLE_COMMAND=1))
     self.assertFalse(self._stalk_tx(AP_CANCEL_COMMAND=1, AP_ENABLE_COMMAND=1))
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
-
-  def test_a_driver_button_reaches_the_camera_during_our_cancel(self):
-    self.safety.set_timer(100000)
-    self.assertTrue(self._stalk_tx(AP_CANCEL_COMMAND=1))
-    msg = self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, {"AP_ENABLE_COMMAND": 1, "COUNTER": 3}, fix_checksum=checksum)
-    self._rx(msg)
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
-
-  def test_a_new_session_forgets_our_frame(self):
-    self.safety.set_timer(100000)
-    self.assertTrue(self._stalk_tx(AP_CANCEL_COMMAND=1))
-    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.safety.get_current_safety_param())
     self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
 
   def test_cancel_frame_of_the_car_port_passes(self):

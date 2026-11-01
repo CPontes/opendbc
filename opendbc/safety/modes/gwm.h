@@ -219,7 +219,7 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     if (minus_allowed) {
       gwm_minus_frames += 1U;
     }
-    if (cancel || resume_allowed || minus_allowed) {
+    if (resume_allowed || minus_allowed) {
       gwm_stalk_tx_seen = true;
       gwm_stalk_tx_ts = microsecond_timer_get();
     }
