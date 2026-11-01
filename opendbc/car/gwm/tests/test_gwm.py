@@ -49,6 +49,12 @@ class TestGwmCarController:
     assert self._steer(-1.0, 150) == 0
     assert self._steer(1.0, -150) == 0
 
+  def test_no_request_when_driver_opposes(self):
+    self._steer(1.0, -150)
+    assert not self.cc.lat_active
+    self._steer(1.0, 150)
+    assert self.cc.lat_active
+
   def test_light_touch_keeps_torque(self):
     assert self._steer(1.0, -60) > 0
 
@@ -56,3 +62,19 @@ class TestGwmCarController:
     # full request, long enough to ramp past the limit
     assert abs(self._steer(1.0, 0, frames=200, v_ego=10 / 3.6)) <= 127
     assert abs(self._steer(1.0, 0, frames=200, v_ego=40 / 3.6)) == 253
+
+
+class TestGwmSteerFault:
+  def _fault(self, lat_active, frames=150):
+    CI = CarInterface(CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6))
+    CI.CC.lat_active = lat_active
+    # no CAN data: the EPS does not confirm the steering request
+    for _ in range(frames):
+      CS = CI.update([])
+    return CS.steerFaultTemporary
+
+  def test_fault_when_eps_ignores_the_request(self):
+    assert self._fault(True)
+
+  def test_no_fault_without_a_request(self):
+    assert not self._fault(False)
