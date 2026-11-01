@@ -187,7 +187,7 @@ class TestGwmAlwaysOnLateral(common.SafetyTestBase):
     self.stalk_counter = 0
 
   def _stalk(self, enable=0, cancel=0):
-    self.stalk_counter = (self.stalk_counter + 1) % 16
+    self.stalk_counter = (self.stalk_counter + 1) % 15
     values = {"AP_ENABLE_COMMAND": enable, "AP_CANCEL_COMMAND": cancel, "COUNTER": self.stalk_counter}
     return self._rx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 0, values, fix_checksum=checksum))
 
