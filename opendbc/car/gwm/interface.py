@@ -14,7 +14,6 @@ class CarInterface(CarInterfaceBase):
 
   def __init__(self, CP):
       super().__init__(CP)
-      self.lat_active = False
       self.isEPSobeying = True
       self.steer_fault_temporary_counter = 0
       self.current_personality = 0
@@ -22,7 +21,6 @@ class CarInterface(CarInterfaceBase):
       self.press_gac_button = False
 
   def apply(self, CC, now_nanos):
-    self.lat_active = CC.latActive
     hud_control = CC.hudControl
     self.current_personality = hud_control.leadDistanceBars
     return super().apply(CC, now_nanos)
@@ -30,7 +28,9 @@ class CarInterface(CarInterfaceBase):
   def update(self, can_packets):
     cp = self.can_parsers[Bus.main]
     self.isEPSobeying = cp.vl["RX_STEER_RELATED"]["A_RX_STEER_REQUESTED"] == 1
-    self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) if (self.lat_active and not self.isEPSobeying) \
+    # carcontroller stops requesting torque while the driver steers against openpilot: the EPS not obeying
+    # then is expected, it would turn every firm takeover longer than 1 s into a fault
+    self.steer_fault_temporary_counter = (self.steer_fault_temporary_counter + 1) if (self.CC.lat_active and not self.isEPSobeying) \
                                           else 0
 
     cp_cam = self.can_parsers[Bus.cam]
