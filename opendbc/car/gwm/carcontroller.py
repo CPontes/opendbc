@@ -23,6 +23,7 @@ class CarController(CarControllerBase):
     self.params = CarControllerParams(self.CP)
     self.packer = CANPacker(dbc_names[Bus.main])
     self.apply_torque_last = 0
+    self.lat_active = False  # what the EPS was last asked to do, not just what openpilot wants
     self.CAN = gwmcan.CanBus(CP)
     self.accel = 0.0
 
@@ -33,6 +34,7 @@ class CarController(CarControllerBase):
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
     lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
+    self.lat_active = lat_active
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     if CC.cruiseControl.cancel:
