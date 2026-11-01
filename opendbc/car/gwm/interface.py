@@ -43,7 +43,9 @@ class CarInterface(CarInterfaceBase):
        (self.pcm_follow_distance == 2 and self.current_personality != 2) or \
        (self.pcm_follow_distance == 1 and self.current_personality != 1):
       self.press_gac_button = not self.press_gac_button
-    ret.buttonEvents = [*ret.buttonEvents, *create_button_events(self.press_gac_button, True, {1: ButtonType.gapAdjustCruise})]
+    # copy first: setting the field wipes the old list, an event from CarState would come out as unknown
+    car_state_events = [be.copy() for be in ret.buttonEvents]
+    ret.buttonEvents = [*car_state_events, *create_button_events(self.press_gac_button, True, {1: ButtonType.gapAdjustCruise})]
 
     return ret
 
