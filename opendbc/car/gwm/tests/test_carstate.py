@@ -7,15 +7,17 @@ from collections import defaultdict
 import pytest
 
 from opendbc.can.packer import CANPacker
-from opendbc.car import Bus, structs
+from opendbc.car import Bus, gen_empty_fingerprint, structs
 from opendbc.car.gwm.interface import CarInterface
-from opendbc.car.gwm.values import CAR, DBC
+from opendbc.car.gwm.values import CAR, DBC, GwmSafetyFlags
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 STALK = "STEER_AND_AP_STALK"
-CAM_MSGS = ("ACC",)
+CAM_MSGS = ("ACC", "STEER_CMD", "ACC_CMD", "LATERAL_STATE")
+STOCK_MSGS = (*CAM_MSGS, STALK, "RX_STEER_RELATED")  # always on the bus of a running car
 ACTIVE = {"CRUISE_STATE_2": 1}
+WHEELS = ("FRONT_LEFT_WHEEL_SPEED", "FRONT_RIGHT_WHEEL_SPEED", "REAR_LEFT_WHEEL_SPEED", "REAR_RIGHT_WHEEL_SPEED")
 
 
 class Car:
@@ -25,7 +27,7 @@ class Car:
     CP.openpilotLongitudinalControl = long
     self.CI = CarInterface(CP)
     self.packer = CANPacker(DBC[CAR.GWM_HAVAL_H6][Bus.pt])
-    self.signals = defaultdict(dict)
+    self.signals = defaultdict(dict, {name: {} for name in STOCK_MSGS})
     self.nanos = 0
     self.CI.update([])  # parsers learn the messages on the first read, a frame sent before that is lost
 
@@ -47,6 +49,22 @@ class Car:
   def lever(self):
     self.pull()
     return self.release()
+
+  def apply(self, lat_active=False, torque=0., cancel=False):
+    CC = structs.CarControl()
+    CC.enabled = CC.latActive = lat_active
+    CC.actuators.torque = torque
+    CC.cruiseControl.cancel = cancel
+    return self.CI.apply(CC.as_reader(), self.nanos)[1]
+
+  def sent(self, sends, name):
+    return [frame for frame in sends if frame[0] == self.packer.dbc.name_to_msg[name].address]
+
+  def field(self, name, frame, signal):
+    sig = self.packer.dbc.name_to_msg[name].sigs[signal]
+    raw = sig.get_raw_value(frame[1])
+    raw -= (1 << sig.size) if sig.is_signed and raw & (1 << (sig.size - 1)) else 0
+    return raw * sig.factor + sig.offset
 
   def cancel(self, value=1):
     return self.step(**{STALK: {"AP_CANCEL_COMMAND": value}})
@@ -146,7 +164,7 @@ class TestSignals:
   def test_gas(self):
     car = Car()
     assert not car.step(CAR_OVERALL_SIGNALS2={"GAS_POSITION": 0}).gasPressed
-    assert car.step(CAR_OVERALL_SIGNALS2={"GAS_POSITION": 1}).gasPressed
+    assert car.step(CAR_OVERALL_SIGNALS2={"GAS_POSITION": 0.4}).gasPressed  # smallest step of the signal
 
   @pytest.mark.parametrize("direction,sign", [(0, 1), (1, -1)])
   def test_steering_angle_is_positive_to_the_left(self, direction, sign):
@@ -193,9 +211,8 @@ class TestSignals:
 
   def test_wheel_speed(self):
     car = Car()
-    speeds = {"FRONT_LEFT_WHEEL_SPEED": 36, "FRONT_RIGHT_WHEEL_SPEED": 36, "REAR_LEFT_WHEEL_SPEED": 36, "REAR_RIGHT_WHEEL_SPEED": 36}
     assert car.step().standstill
-    ret = car.step(WHEEL_SPEEDS=speeds)
+    ret = car.step(WHEEL_SPEEDS=dict.fromkeys(WHEELS, 36))
     assert not ret.standstill and ret.vEgoRaw == pytest.approx(10., abs=0.01)
 
   def test_acc_fault(self):
@@ -212,7 +229,8 @@ class TestFaults:
   def test_eps_fault_bit_needs_a_second(self):
     car = Car()
     assert not car.step(frames=100, RX_STEER_RELATED={"EPS_FAULT_PERMANENT": 1}).steerFaultTemporary
-    assert car.step().steerFaultTemporary
+    ret = car.step()
+    assert ret.steerFaultTemporary and not ret.steerFaultPermanent
     assert not car.step(RX_STEER_RELATED={"EPS_FAULT_PERMANENT": 0}).steerFaultTemporary
 
   def test_eps_fault_bit_count_restarts(self):
@@ -254,22 +272,93 @@ class TestFollowDistance:
   def test_no_press_when_they_agree(self, distance, personality):
     car = Car()
     car.CI.current_personality = personality
-    before = car.CI.press_gac_button
-    car.step(frames=5, ACC={"CAR_DISTANCE_SELECTION": distance})
-    assert car.CI.press_gac_button == before
+    states = set()
+    for _ in range(5):
+      car.step(ACC={"CAR_DISTANCE_SELECTION": distance})
+      states.add(car.CI.press_gac_button)
+    assert states == {False}
 
   @pytest.mark.parametrize("distance,personality", [(1, 2), (2, 1), (3, 2), (4, 1)])
   def test_presses_until_they_agree(self, distance, personality):
     car = Car()
     car.CI.current_personality = personality
-    states = set()
+    states, events = set(), []
     for _ in range(4):
-      car.step(ACC={"CAR_DISTANCE_SELECTION": distance})
+      events += car.step(ACC={"CAR_DISTANCE_SELECTION": distance}).buttonEvents
       states.add(car.CI.press_gac_button)
     assert states == {True, False}
+    assert events and all(be.type == ButtonType.gapAdjustCruise for be in events)
 
   @pytest.mark.xfail(strict=True, reason="STATE-01: a button release is reported on every frame the press state is False")
   def test_no_button_event_without_a_press(self):
     car = Car()
     car.CI.current_personality = 3
     assert not car.step(frames=5, ACC={"CAR_DISTANCE_SELECTION": 3}).buttonEvents
+
+
+class TestCommands:
+  CAMERA_BUS = 2
+
+  def test_cancel_reaches_the_camera_ahead_of_the_stock_frame(self):
+    car = Car()
+    car.step(**{STALK: {"COUNTER": 6, "STEERING_ANGLE": 12.5}})
+    frames = car.sent(car.apply(cancel=True), STALK)
+    assert len(frames) == 1 and frames[0][2] == self.CAMERA_BUS
+    assert car.field(STALK, frames[0], "AP_CANCEL_COMMAND") == 1
+    assert car.field(STALK, frames[0], "COUNTER") == 7
+    assert car.field(STALK, frames[0], "STEERING_ANGLE") == pytest.approx(12.5, abs=0.1)
+
+  def test_cancel_counter_wraps(self):
+    car = Car()
+    car.step(**{STALK: {"COUNTER": 15}})
+    assert car.field(STALK, car.sent(car.apply(cancel=True), STALK)[0], "COUNTER") == 0
+
+  def test_no_cancel_no_frame(self):
+    car = Car()
+    car.step()
+    assert not car.sent(car.apply(), STALK)
+
+  def test_rates(self):
+    car = Car()
+    car.step()
+    sends = [car.apply() for _ in range(20)]
+    assert [len(car.sent(s, "STEER_CMD")) for s in sends[:4]] == [1, 0, 1, 0]
+    assert [len(car.sent(s, "RX_STEER_RELATED")) for s in sends[:4]] == [1, 0, 1, 0]
+    assert [len(car.sent(s, "LATERAL_STATE")) for s in sends[:6]] == [1, 0, 0, 0, 0, 1]
+
+  def test_torque_goes_out_with_its_sign(self):
+    for torque, sign in ((0.1, 1), (-0.1, -1)):
+      car = Car()
+      car.step(WHEEL_SPEEDS=dict.fromkeys(WHEELS, 54))
+      for _ in range(100):
+        sends = car.apply(lat_active=True, torque=torque)
+      steer = car.sent(sends, "STEER_CMD") or car.sent(car.apply(lat_active=True, torque=torque), "STEER_CMD")
+      assert sign * car.field("STEER_CMD", steer[0], "TORQUE_CMD") > 0
+
+  def test_one_unit_of_torque_is_never_sent(self):
+    # repeated +-1 faults the EPS
+    car = Car()
+    car.step(WHEEL_SPEEDS=dict.fromkeys(WHEELS, 54))
+    car.CI.CC.params.STEER_MAX = 100
+    torque = car.field("STEER_CMD", car.sent(car.apply(lat_active=True, torque=0.01), "STEER_CMD")[0], "TORQUE_CMD")
+    assert torque == 2
+
+  def test_eps_torque_echoes_the_command_or_the_driver(self):
+    car = Car()
+    car.step(RX_STEER_RELATED={"B_RX_DRIVER_TORQUE": 40}, WHEEL_SPEEDS=dict.fromkeys(WHEELS, 54))
+    frames = car.sent(car.apply(), "RX_STEER_RELATED")
+    assert car.field("RX_STEER_RELATED", frames[0], "B_RX_DRIVER_TORQUE") == 40
+    car.step()
+    car.apply()
+    for _ in range(40):
+      sends = car.apply(lat_active=True, torque=-0.1)
+    frames = car.sent(sends, "RX_STEER_RELATED") or car.sent(car.apply(lat_active=True, torque=-0.1), "RX_STEER_RELATED")
+    assert car.field("RX_STEER_RELATED", frames[0], "B_RX_DRIVER_TORQUE") == 2 * car.CI.CC.apply_torque_last
+
+
+class TestParams:
+  def test_longitudinal_needs_the_alpha_toggle(self):
+    off = CarInterface.get_params(CAR.GWM_HAVAL_H6, gen_empty_fingerprint(), [], False, False, False)
+    on = CarInterface.get_params(CAR.GWM_HAVAL_H6, gen_empty_fingerprint(), [], True, False, False)
+    assert not off.openpilotLongitudinalControl and not off.safetyConfigs[-1].safetyParam & GwmSafetyFlags.LONG_CONTROL.value
+    assert on.openpilotLongitudinalControl and on.safetyConfigs[-1].safetyParam & GwmSafetyFlags.LONG_CONTROL.value
