@@ -41,7 +41,6 @@ GAS_RAMP_MAX = 0.4  # m/s^2
 BRAKE_RAMP_RATE = 1.0  # m/s^3
 BRAKE_RAMP_MIN = -1.0  # m/s^2
 HANDOFF_TIME = 0.18  # s, under the 0.2 of the panda. The stock ACC brakes on for 0.1 s after the pedal, until it drops
-HANDOFF_MIN_BRAKE = -0.06  # m/s^2, the brake field has to be above its zero or the panda doesn't open
 
 
 class CarController(CarControllerBase):
@@ -56,7 +55,7 @@ class CarController(CarControllerBase):
     self.braking = False
     self.brake_accel_last = 0.0
     self.brake_hold = 0.
-    self.brake_sent = deque([0.] * 3, maxlen=3)  # the panda takes its level at the pedal, frames before openpilot lets go
+    self.brake_sent = deque([None] * 3, maxlen=3)  # the panda takes its level at the pedal, frames before openpilot lets go
     self.handoff_left = 0.  # s
     self.handoff_accel = 0.
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
@@ -174,9 +173,9 @@ class CarController(CarControllerBase):
           self.accel = float(np.clip(min(actuators.accel, 0.), CarControllerParams.ACCEL_MIN, 0.))
         # the pedal takes a moment to build pressure: until the car drops the ACC our brake stays, as its own does
         pedal = CS.out.brakePressed and not CS.out.gasPressed
-        level = max(self.brake_sent)  # the weakest of them: asking for more than the panda saw is refused, and no 0x143 goes out at all
-        if pedal and CS.acc_driving and was_braking and not CC.longActive and level < HANDOFF_MIN_BRAKE:
-          self.handoff_left, self.handoff_accel = HANDOFF_TIME, level
+        # the weakest of them: asking for more than the panda saw is refused, and no 0x143 goes out at all
+        if pedal and CS.acc_driving and was_braking and not CC.longActive and None not in self.brake_sent:
+          self.handoff_left, self.handoff_accel = HANDOFF_TIME, max(self.brake_sent)
         elif not pedal or not CS.acc_driving or CC.longActive:
           self.handoff_left = 0.
         handing_off = self.handoff_left > 0.
@@ -192,7 +191,7 @@ class CarController(CarControllerBase):
             self.gas_ramp = None
           else:
             self.accel = self.gas_ramp
-        self.brake_sent.append(self.accel if self.braking else 0.)
+        self.brake_sent.append(self.accel if self.braking else None)
         if handing_off:
           self.accel = self.handoff_accel
         can_sends.append(gwmcan.create_longitudinal_command(

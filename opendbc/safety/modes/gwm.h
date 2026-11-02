@@ -121,7 +121,7 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
     if (msg->addr == GWM_BRAKE) {
       bool pressed = GET_BIT(msg, 11U);
       bool long_on = get_longitudinal_allowed() && (!gwm_always_on_lateral || gwm_long_allowed);
-      if (pressed && !gwm_brake_pressed_prev && long_on && (gwm_brake_last > GWM_BRAKE_ZERO)) {
+      if (pressed && !gwm_brake_pressed_prev && long_on && (gwm_brake_last >= GWM_BRAKE_ZERO)) {
         gwm_handoff = true;
         gwm_handoff_brake = gwm_brake_last;
         gwm_handoff_ts = microsecond_timer_get();

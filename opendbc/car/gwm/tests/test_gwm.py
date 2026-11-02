@@ -342,11 +342,19 @@ class TestGwmLongitudinal:
     self.send(0., active=False)
     assert self.send(.5)[0] == 12
 
-  def test_a_brake_at_zero_holds_nothing(self):
-    # the panda only opens on a real brake: every frame of a try would be refused
+  def test_the_brake_that_holds_a_descent_stays_too(self):
+    # the field at its zero is still the car holding the slope: 82 to 87% of the brake frames on descents
     self.braking_with_the_acc(-.5)
     for _ in range(80):
       self.send(-.01)
+    self.pedal()
+    assert self.send(0., active=False)[:2] == (13, 41)
+
+  def test_a_frame_of_gas_among_the_last_holds_nothing(self):
+    # the panda took its level from the frame of gas: every frame of a try would be refused
+    self.braking_with_the_acc(-.5)
+    self.send(.5)
+    self.send(-.5)
     self.pedal()
     assert self.send(0., active=False) == (4, 0, 0)
 

@@ -528,11 +528,16 @@ class TestGwmBrakeHandoff(GwmStalkTest):
     self.assertFalse(self._long(70, 1))
     self.assertFalse(self._long(70, -1))
 
-  def test_not_without_a_real_brake_before_it(self):
+  def test_the_brake_field_at_its_zero_counts(self):
     self.assertTrue(self._long(41))
     self._brake(1)
-    self.assertFalse(self._long(41))
-    self.assertFalse(self._long(1))
+    self.assertTrue(self._long(41))
+    self.assertFalse(self._long(42))
+
+  def test_not_below_the_zero_of_the_brake_field(self):
+    self.assertTrue(self._long(40))
+    self._brake(1)
+    self.assertFalse(self._long(40))
 
   def test_not_out_of_the_gas(self):
     self.assertTrue(self._long(0, 500))
