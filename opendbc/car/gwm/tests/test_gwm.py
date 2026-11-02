@@ -243,6 +243,77 @@ class TestGwmLongitudinal:
       out = self.send(accel, pitch)
     return out
 
+  def stock(self, mode):
+    frame = bytearray(self.CS.longitudinal_stock_data)
+    frame[9] = mode
+    self.CS.longitudinal_stock_data = bytes(frame)
+
+  def pedal(self, pressed=True):
+    self.CS.out.brakePressed = pressed
+
+  def braking_with_the_acc(self, accel=-2.):
+    self.CS.acc_driving = True
+    self.stock(12)
+    self.settle(accel)
+
+  def test_the_pedal_takes_over_from_our_brake(self):
+    self.braking_with_the_acc()
+    held = self.send(-2.)[1]
+    self.pedal()
+    assert self.send(0., active=False)[:2] == (13, held)
+    assert self.send(0., active=False)[:2] == (13, held)
+
+  def test_the_brake_ends_when_the_car_drops_the_acc(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    self.send(0., active=False)
+    self.CS.acc_driving = False
+    self.stock(4)
+    assert self.send(0., active=False) == (4, 0, 0)
+
+  def test_the_brake_stays_less_than_the_panda_lets_it(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    modes = [self.send(0., active=False)[0] for _ in range(20)]
+    assert modes.count(13) == 9  # 50 Hz: 0.18 s, the panda stops at 0.2
+    assert 12 not in modes
+
+  def test_out_of_the_brake_there_is_no_gas_frame(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    self.CS.acc_driving = False
+    assert self.send(0., active=False) == (4, 0, 0)
+
+  def test_the_brake_is_not_held_with_the_gas_pedal(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    self.CS.out.gasPressed = True
+    assert self.send(0., active=False)[1] == 0
+
+  def test_letting_go_of_the_pedal_ends_it(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    self.send(0., active=False)
+    self.pedal(False)
+    assert self.send(0., active=False)[1] == 0
+
+  def test_the_pedal_out_of_the_gas_holds_nothing(self):
+    self.CS.acc_driving = True
+    self.stock(12)
+    self.settle(.5)
+    self.pedal()
+    assert self.send(0., active=False) == (4, 0, 0)
+
+  def test_a_brake_lost_without_the_pedal_holds_nothing(self):
+    self.braking_with_the_acc()
+    assert self.send(0., active=False)[1] == 0
+
+  def test_the_mode_of_the_acc_is_kept_out_of_the_pedal(self):
+    self.stock(8)
+    assert self.send(0., active=False)[0] == 8
+    self.pedal()
+    assert self.send(0., active=False)[0] == 8
+
   def test_no_dead_zone_in_the_gas(self):
     assert self.send(0.3)[2] > 300
     assert self.send(0.5)[2] == 725

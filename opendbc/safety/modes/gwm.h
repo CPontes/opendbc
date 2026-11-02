@@ -22,11 +22,21 @@
 #define GWM_MINUS_MAX_FRAMES     78U  // 6 presses, 30 km/h down. It can't take the car off a road by itself
 #define GWM_MINUS_QUIET_US   60000000U  // the budget comes back only after this long with none: any minute holds 6 presses at most
 
+#define GWM_BRAKE_ZERO              41  // the brake field with no braking in it
+#define GWM_BRAKE_HANDOFF_US    200000U  // a pedal takes about this to build pressure, and the stock ACC brakes on for 0.1 s
+
 // always-on lateral: the brake pauses openpilot longitudinal only, steering stays
 // engaged until the cancel button. Longitudinal resumes on the next lever pull.
 static bool gwm_always_on_lateral = false;
 static bool gwm_long_allowed = false;
 static bool gwm_brake_pressed_prev = false;
+
+// brake handoff: when the pedal takes over from a brake of ours, that brake may stay for a moment. Only coming down, never
+// with gas, once per press. Letting go of it at once takes the braking away before the pedal has built any
+static int gwm_brake_last = 0;  // what the last frame that went out asked for
+static bool gwm_handoff = false;
+static int gwm_handoff_brake = 0;
+static uint32_t gwm_handoff_ts = 0U;
 
 // auto resume: one pull of the stalk per stop, with openpilot engaged and no pedal or button in use
 static bool gwm_auto_resume = false;
@@ -110,15 +120,24 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
 
     if (msg->addr == GWM_BRAKE) {
       bool pressed = GET_BIT(msg, 11U);
+      bool long_on = get_longitudinal_allowed() && (!gwm_always_on_lateral || gwm_long_allowed);
+      if (pressed && !gwm_brake_pressed_prev && long_on && (gwm_brake_last > GWM_BRAKE_ZERO)) {
+        gwm_handoff = true;
+        gwm_handoff_brake = gwm_brake_last;
+        gwm_handoff_ts = microsecond_timer_get();
+      }
+      if (!pressed) {
+        gwm_handoff = false;
+      }
       if (gwm_always_on_lateral) {
         // keep the generic brake disengage from dropping lateral, pause longitudinal instead
         if (pressed && (!gwm_brake_pressed_prev || vehicle_moving)) {
           gwm_long_allowed = false;
         }
-        gwm_brake_pressed_prev = pressed;
       } else {
         brake_pressed = pressed;
       }
+      gwm_brake_pressed_prev = pressed;
     }
 
     if (msg->addr == GWM_RX_STEER_RELATED) {
@@ -185,15 +204,22 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     if (msg->addr == GWM_LONG_CONTROL) {
       int brake_raw = msg->data[13];
       brake_raw = 181 - brake_raw;
-      violation |= longitudinal_brake_checks(brake_raw, GWM_LONG_LIMITS);
-
       int gas_raw = ((msg->data[27] & 0x1FU) << 8) | (msg->data[28]);
       gas_raw = gas_raw - 192;
       violation |= longitudinal_gas_checks(gas_raw, GWM_LONG_LIMITS);
 
-      // longitudinal paused by the brake in always-on lateral: only inactive commands
-      bool long_paused = gwm_always_on_lateral && !gwm_long_allowed;
-      violation |= long_paused && ((brake_raw != 0) || (gas_raw != GWM_LONG_LIMITS.inactive_gas));
+      bool handoff = gwm_handoff && !gas_pressed && (gas_raw == GWM_LONG_LIMITS.inactive_gas) && (brake_raw <= gwm_handoff_brake) &&
+                     (safety_get_ts_elapsed(microsecond_timer_get(), gwm_handoff_ts) < GWM_BRAKE_HANDOFF_US);
+      if (handoff) {
+        gwm_handoff_brake = brake_raw;
+      } else {
+        violation |= longitudinal_brake_checks(brake_raw, GWM_LONG_LIMITS);
+
+        // longitudinal paused by the brake in always-on lateral: only inactive commands
+        bool long_paused = gwm_always_on_lateral && !gwm_long_allowed;
+        violation |= long_paused && ((brake_raw != 0) || (gas_raw != GWM_LONG_LIMITS.inactive_gas));
+      }
+      gwm_brake_last = violation ? 0 : brake_raw;
     }
   }
 
@@ -278,6 +304,10 @@ static safety_config gwm_init(uint16_t param) {
   gwm_acc_minus = GET_FLAG(param, FLAG_GWM_ACC_MINUS);
   gwm_long_allowed = false;
   gwm_brake_pressed_prev = false;
+  gwm_brake_last = 0;
+  gwm_handoff = false;
+  gwm_handoff_brake = 0;
+  gwm_handoff_ts = 0U;
   gwm_stalk_button = false;
   gwm_resume_frames = 0U;
   gwm_minus_frames = 0U;

@@ -482,6 +482,126 @@ class TestGwmAccMinus(GwmStalkTest):
     self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
 
 
+class TestGwmBrakeHandoff(GwmStalkTest):
+  """The pedal takes a moment to build pressure, and the stock ACC keeps braking for about 0.1 s until it drops. Ours may too."""
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL
+  T0 = 100000000
+
+  def setUp(self):
+    super().setUp()
+    self.safety.set_timer(self.T0)
+    self._speed(10)
+    self._rx_stalk(AP_ENABLE_COMMAND=1)
+    self._rx_stalk()
+
+  def _long(self, brake=0, gas=0):
+    return self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"BRAKE_CMD": -brake, "GAS_CMD": gas}))
+
+  def _pedal_while_braking(self, brake=70):
+    self.assertTrue(self._long(brake))
+    self._brake(1)
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_the_brake_stays_a_moment_after_the_pedal(self):
+    self._pedal_while_braking(70)
+    self.assertTrue(self._long(70))
+    self.assertTrue(self._long(60))
+
+  def test_it_only_comes_down(self):
+    self._pedal_while_braking(70)
+    self.assertFalse(self._long(71))
+    self.assertTrue(self._long(60))
+    self.assertFalse(self._long(61))
+    self.assertTrue(self._long(60))
+
+  def test_it_ends_with_the_window(self):
+    self._pedal_while_braking(70)
+    self.safety.set_timer(self.T0 + 199999)
+    self.assertTrue(self._long(70))
+    self.safety.set_timer(self.T0 + 200000)
+    self.assertFalse(self._long(70))
+    self.assertTrue(self._long(0))
+
+  def test_never_gas(self):
+    self._pedal_while_braking(70)
+    self.assertFalse(self._long(0, 1))
+    self.assertFalse(self._long(70, 1))
+    self.assertFalse(self._long(70, -1))
+
+  def test_not_without_a_real_brake_before_it(self):
+    self.assertTrue(self._long(41))
+    self._brake(1)
+    self.assertFalse(self._long(41))
+    self.assertFalse(self._long(1))
+
+  def test_not_out_of_the_gas(self):
+    self.assertTrue(self._long(0, 500))
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+  def test_a_refused_frame_is_no_brake_before_it(self):
+    self.assertTrue(self._long(70))
+    self.assertFalse(self._long(108))
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+  def test_letting_go_of_the_pedal_ends_it(self):
+    self._pedal_while_braking(70)
+    self._brake(0)
+    self.assertFalse(self._long(70))
+
+  def test_the_gas_pedal_ends_it(self):
+    self._pedal_while_braking(70)
+    self._gas(100)
+    self.assertFalse(self._long(70))
+
+  def test_a_second_press_starts_nothing(self):
+    self._pedal_while_braking(70)
+    self._brake(0)
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+  def test_not_when_openpilot_was_not_in_control(self):
+    self.assertTrue(self._long(70))
+    self._rx_stalk(AP_CANCEL_COMMAND=1)
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+  def test_with_the_gas_held_nothing_starts(self):
+    self.assertTrue(self._long(70))
+    self._gas(100)
+    self._brake(1)
+    self._gas(0)
+    self.assertFalse(self._long(70))
+
+  def test_a_new_session_forgets_it(self):
+    self._pedal_while_braking(70)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self.assertFalse(self._long(70))
+
+
+class TestGwmBrakeHandoffAlwaysOn(TestGwmBrakeHandoff):
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL
+
+  def _pedal_while_braking(self, brake=70):
+    self.assertTrue(self._long(brake))
+    self._brake(1)
+
+  def test_a_second_press_starts_nothing(self):
+    self._pedal_while_braking(70)
+    self._brake(0)
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+  def test_not_when_openpilot_was_not_in_control(self):
+    self.assertTrue(self._long(70))
+    self._rx_stalk(AP_CANCEL_COMMAND=1)
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
+
 class TestGwmAlwaysOnLateral(common.SafetyTestBase):
   """Brake pauses longitudinal only, steering stays engaged until cancel; lever resumes longitudinal."""
 
@@ -525,11 +645,13 @@ class TestGwmAlwaysOnLateral(common.SafetyTestBase):
     self.assertTrue(self._gas_ok(1000))
     self.assertTrue(self._brake_cmd_ok(50))
 
-    # brake while moving: steering stays, longitudinal limited to inactive commands
+    # brake while moving: steering stays, longitudinal limited to inactive commands once the handoff is over
+    self.safety.set_timer(10000000)
     self._brake(1)
     self.assertTrue(self.safety.get_controls_allowed())
     self.assertTrue(self._steer_ok())
     self.assertFalse(self._gas_ok(1000))
+    self.safety.set_timer(10200000)
     self.assertFalse(self._brake_cmd_ok(50))
     self.assertTrue(self._gas_ok(0))
 

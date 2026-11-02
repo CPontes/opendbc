@@ -66,7 +66,7 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
   return 0x12B, dat, CAN.main
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False):
   values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
             ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
   brake_cmd = accel_cmd = 0
@@ -78,6 +78,8 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, acc
   elif active:
     values.update(BRAKE_OR_GAS_REQ=12, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
     accel_cmd = np.interp(accel, ACC_GAS_ACCEL, ACC_GAS)
+  elif pedal and values["BRAKE_OR_GAS_REQ"] in (12, 13):
+    values.update(BRAKE_OR_GAS_REQ=4)  # the camera is a moment behind the pedal: never a frame of gas between our brake and the driver's
   values.update(BRAKE_CMD=brake_cmd, GAS_CMD=accel_cmd)
   dat = _update_fields(packer, "ACC_CMD", longitudinal_stock_data, values)
   dat = _update_fields(packer, "ACC_CMD", dat, {

@@ -39,6 +39,7 @@ GAS_RAMP_MAX = 0.4  # m/s^2
 # applications. Harder braking isn't limited
 BRAKE_RAMP_RATE = 1.0  # m/s^3
 BRAKE_RAMP_MIN = -1.0  # m/s^2
+HANDOFF_TIME = 0.18  # s, under the 0.2 of the panda. The stock ACC brakes on for 0.1 s after the pedal, until it drops
 
 
 class CarController(CarControllerBase):
@@ -53,6 +54,8 @@ class CarController(CarControllerBase):
     self.braking = False
     self.brake_accel_last = 0.0
     self.brake_hold = 0.
+    self.handoff_left = 0.  # s
+    self.handoff_accel = 0.
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -161,7 +164,16 @@ class CarController(CarControllerBase):
         brake_wanted = standstill or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
+        was_braking, brake_before = self.braking, self.brake_accel_last
         self.braking = CC.longActive and (brake_wanted or brake_held)
+        # the pedal takes a moment to build pressure: until the car drops the ACC our brake stays, as its own does
+        pedal = CS.out.brakePressed and not CS.out.gasPressed
+        if pedal and CS.acc_driving and was_braking and not CC.longActive:
+          self.handoff_left, self.handoff_accel = HANDOFF_TIME, brake_before
+        elif not pedal or not CS.acc_driving or CC.longActive:
+          self.handoff_left = 0.
+        handing_off = self.handoff_left > 0.
+        self.handoff_left = max(self.handoff_left - DT_CTRL * self.params.STEER_STEP, 0.)
         if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
         self.brake_accel_last = min(self.accel, 0.)
@@ -177,10 +189,11 @@ class CarController(CarControllerBase):
           self.packer,
           self.CAN,
           longitudinal_stock_data=CS.longitudinal_stock_data,
-          accel=self.accel,
-          braking=self.braking,
-          active=CC.longActive,
+          accel=self.handoff_accel if handing_off else self.accel,
+          braking=self.braking or handing_off,
+          active=CC.longActive or handing_off,
           standstill=standstill,
+          pedal=pedal,
         ))
 
     if self.frame % 5 == 0 and CS.hud_stock_data is not None: # 20 Hz
