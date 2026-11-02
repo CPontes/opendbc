@@ -220,6 +220,10 @@ class TestGwmLongitudinal:
                               acc_waiting=False, acc_driving=False, stalk_idle=True)
 
   def send(self, accel, pitch=0., state=None, active=True):
+    frame = self.frame(accel, pitch, state, active)
+    return frame[9] & 0x1F, 181 - frame[13], ((frame[27] & 0x1F) << 8 | frame[28]) - 192
+
+  def frame(self, accel, pitch=0., state=None, active=True):
     CC = structs.CarControl()
     CC.enabled = active
     CC.longActive = active
@@ -231,8 +235,7 @@ class TestGwmLongitudinal:
       for addr, dat, _bus in self.cc.update(CC.as_reader(), self.CS, 0)[1]:
         if addr == 0x143:
           frame = dat
-    mode = frame[9] & 0x1F
-    return mode, 181 - frame[13], ((frame[27] & 0x1F) << 8 | frame[28]) - 192
+    return frame
 
   def settle(self, accel, pitch=0.):
     for _ in range(300):
@@ -247,7 +250,7 @@ class TestGwmLongitudinal:
   def test_gas_and_brake_stay_inside_what_the_panda_allows(self):
     for accel in np.arange(-5., 5., .1):
       _, brake, gas = self.send(float(accel))
-      assert brake <= 107 and 0 <= gas <= 4577
+      assert brake <= 107 and -192 <= gas <= 4577
 
   def test_more_acceleration_never_means_less_gas(self):
     assert list(gwmcan.ACC_GAS) == sorted(gwmcan.ACC_GAS) and len(gwmcan.ACC_GAS) == len(gwmcan.ACC_GAS_ACCEL)
@@ -255,7 +258,7 @@ class TestGwmLongitudinal:
   def test_a_request_around_zero_does_not_flip_gas_and_brake(self):
     modes = [self.send(a)[0] for a in [0.05, -0.05, -0.2, 0.05, -0.1, -0.2, 0.] * 10]
     assert set(modes) == {12}
-    self.send(-0.3)
+    self.settle(-0.3)
     modes = [self.send(a)[0] for a in [-0.2, -0.3, -0.15, -0.26, -0.11] * 10]
     assert set(modes) == {13}
 
@@ -271,6 +274,36 @@ class TestGwmLongitudinal:
     self.setup_method()
     mode, brake, gas = self.settle(0., math.atan(-.14))
     assert mode == 13 and brake > 41 and gas == 0
+
+  def test_mild_deceleration_eases_off_the_engine_before_the_brake(self):
+    mode, brake, gas = self.send(-0.14)
+    assert mode == 12 and brake == 0 and gas == -192
+
+  def test_braking_flags_are_the_cameras_so_regen_works(self):
+    self.send(-0.5)
+    frame = self.frame(-0.5)
+    assert frame[9] & 0x1F == 13 and frame[27] >> 5 == 3 and frame[29] >> 7 == 0
+    frame = self.frame(1.)
+    assert frame[9] & 0x1F == 12 and frame[27] >> 5 == 4 and frame[29] >> 7 == 1
+
+  def brake_at(self, frames, accel):
+    return [self.send(accel)[1] for _ in range(frames)][-1]
+
+  def test_moderate_braking_builds_slowly(self):
+    assert self.brake_at(5, -0.9) < 50  # 0.1 s in, at 1 m/s^3 from -0.25
+    self.setup_method()
+    assert self.brake_at(60, -0.9) >= 57
+
+  def test_hard_braking_is_never_held_back(self):
+    assert self.send(-2.)[1] >= 78
+    self.setup_method()
+    self.send(-0.5)
+    assert self.send(-3.5)[1] == 107
+
+  def test_a_climb_never_takes_braking_away(self):
+    flat = self.settle(-1.)
+    self.setup_method()
+    assert self.settle(-1., math.atan(.1))[1] == flat[1]
 
   def test_the_slope_is_left_out_of_a_stop(self):
     stopping = structs.CarControl.Actuators.LongControlState.stopping

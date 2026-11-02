@@ -60,10 +60,10 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
   MAX_TORQUE_ERROR = 80
   TORQUE_MEAS_TOLERANCE = 1
 
-  MIN_GAS = -10
+  MIN_GAS = -192
   MAX_GAS = 4577
-  MIN_POSSIBLE_GAS = -11
-  MAX_POSSIBLE_GAS = 4600  # reasonably excessive limits, not signal max
+  MIN_POSSIBLE_GAS = -192
+  MAX_POSSIBLE_GAS = 4608  # reasonably excessive limits, not signal max. The sparse test values stay whole numbers
   INACTIVE_GAS = 0
 
   MAX_BRAKE = 107

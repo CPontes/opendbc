@@ -21,6 +21,10 @@ MINUS_GAP = 35  # frames between presses: the driver's are 0.35 s apart, and the
 # goes to the brake around -0.23 m/s^2, comes back around -0.16 and changes 7 times a minute
 BRAKE_ON = -0.25  # m/s^2
 BRAKE_OFF = -0.1  # m/s^2
+# Moderate braking builds slowly enough for regen to take it, as the stock ACC does: under 1 m/s^3 in 434 brake
+# applications. Harder braking isn't limited
+BRAKE_RAMP_RATE = 1.0  # m/s^3
+BRAKE_RAMP_MIN = -1.0  # m/s^2
 
 
 class CarController(CarControllerBase):
@@ -33,6 +37,7 @@ class CarController(CarControllerBase):
     self.CAN = gwmcan.CanBus(CP)
     self.accel = 0.0
     self.braking = False
+    self.brake_accel_last = 0.0
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
     self.resume_frames = 0
@@ -131,10 +136,15 @@ class CarController(CarControllerBase):
       if self.CP.openpilotLongitudinalControl and CS.longitudinal_stock_data is not None:
         standstill = actuators.longControlState == LongCtrlState.stopping
         accel = actuators.accel
-        if actuators.longControlState == LongCtrlState.pid:  # the slope, before the car has to speed up or slow down to show it
-          accel += math.sin(self.pitch.x) * ACCELERATION_DUE_TO_GRAVITY
+        slope = math.sin(self.pitch.x) * ACCELERATION_DUE_TO_GRAVITY
+        # the slope, before the car has to speed up or slow down to show it. A climb never takes braking away
+        if actuators.longControlState == LongCtrlState.pid and (slope < 0 or accel > 0):
+          accel += slope
         self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         self.braking = CC.longActive and (standstill or self.accel < (BRAKE_OFF if self.braking else BRAKE_ON))
+        if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
+          self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
+        self.brake_accel_last = self.accel if self.braking else min(self.accel, 0.)
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,

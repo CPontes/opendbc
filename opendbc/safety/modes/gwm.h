@@ -166,7 +166,7 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
 
   const LongitudinalLimits GWM_LONG_LIMITS = {
     .max_gas = 4577,
-    .min_gas = -10,
+    .min_gas = -192,  // the stock ACC asks for less engine torque down to here
     .inactive_gas = 0,
     .max_brake = 107,
   };
