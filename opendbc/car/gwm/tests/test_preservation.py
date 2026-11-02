@@ -33,7 +33,7 @@ class TestGwmPreservation(unittest.TestCase):
           self.assertEqual((addr, bus), (0x12B, 0))
           self.assert_unchanged(original, output, {8:0xff, 9:0xff, 10:0xfc, 12:0xff, 13:0xe0, 15:0x2f})
           self.assertEqual(output[16:24], original[16:24])
-          self.assertEqual(output[15] & 0xf, ((original[15] & 0xf) + 1) % 15)
+          self.assertEqual(output[15] & 0xf, ((original[15] & 0xf) + 1) % 16)
           self.assertEqual(bool(output[15] & 0x20), request)
           raw_torque = ((output[12] & 0x7f) << 3) | (output[13] >> 5)
           self.assertEqual((raw_torque - 1024 if raw_torque & 512 else raw_torque) + 1, steer)
