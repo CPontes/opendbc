@@ -208,8 +208,8 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
       gas_raw = gas_raw - 192;
       violation |= longitudinal_gas_checks(gas_raw, GWM_LONG_LIMITS);
 
-      bool handoff = gwm_handoff && !gas_pressed && (gas_raw == GWM_LONG_LIMITS.inactive_gas) && (brake_raw <= gwm_handoff_brake) &&
-                     (safety_get_ts_elapsed(microsecond_timer_get(), gwm_handoff_ts) < GWM_BRAKE_HANDOFF_US);
+      gwm_handoff = gwm_handoff && !gas_pressed && (safety_get_ts_elapsed(microsecond_timer_get(), gwm_handoff_ts) < GWM_BRAKE_HANDOFF_US);
+      bool handoff = gwm_handoff && (gas_raw == GWM_LONG_LIMITS.inactive_gas) && (brake_raw >= 0) && (brake_raw <= gwm_handoff_brake);
       if (handoff) {
         gwm_handoff_brake = brake_raw;
       } else {

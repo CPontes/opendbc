@@ -581,6 +581,44 @@ class TestGwmBrakeHandoff(GwmStalkTest):
     self.safety.init_tests()
     self.assertFalse(self._long(70))
 
+  def test_a_pedal_held_down_starts_nothing(self):
+    self._brake(1)
+    self.safety.set_controls_allowed(1)
+    self.assertTrue(self._long(70))
+    self._brake(1)
+    self.safety.set_controls_allowed(0)
+    self.assertFalse(self._long(70))
+
+  def test_the_window_never_comes_back(self):
+    self._pedal_while_braking(70)
+    self.safety.set_timer(self.T0 + 200000)
+    self.assertFalse(self._long(70))
+    self.safety.set_timer(self.T0 + 100)  # the timer wraps after 71 min
+    self.assertFalse(self._long(70))
+
+  def test_a_touch_of_the_gas_ends_it_for_good(self):
+    self._pedal_while_braking(70)
+    self._gas(100)
+    self.assertFalse(self._long(70))
+    self._gas(0)
+    self.assertFalse(self._long(70))
+
+  def test_a_negative_brake_field_is_refused(self):
+    self._pedal_while_braking(70)
+    self.assertFalse(self._long(-1))
+    self.assertTrue(self._long(70))
+
+  def test_a_new_session_forgets_the_last_brake(self):
+    self.assertTrue(self._long(70))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self.safety.set_timer(self.T0)
+    self._speed(10)
+    self._rx_stalk(AP_ENABLE_COMMAND=1)
+    self._rx_stalk()
+    self._brake(1)
+    self.assertFalse(self._long(70))
+
 
 class TestGwmBrakeHandoffAlwaysOn(TestGwmBrakeHandoff):
   SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL
@@ -588,6 +626,12 @@ class TestGwmBrakeHandoffAlwaysOn(TestGwmBrakeHandoff):
   def _pedal_while_braking(self, brake=70):
     self.assertTrue(self._long(brake))
     self._brake(1)
+
+  def test_a_pedal_held_down_starts_nothing(self):
+    self._brake(1)
+    self.assertFalse(self._long(70))
+    self._brake(1)
+    self.assertFalse(self._long(70))
 
   def test_a_second_press_starts_nothing(self):
     self._pedal_while_braking(70)

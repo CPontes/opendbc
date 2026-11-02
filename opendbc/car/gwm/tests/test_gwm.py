@@ -314,6 +314,66 @@ class TestGwmLongitudinal:
     self.pedal()
     assert self.send(0., active=False)[0] == 8
 
+  def test_a_deepening_brake_holds_what_the_panda_saw(self):
+    # the panda takes the level at the pedal, frames before openpilot lets go: asking for more would be refused, and no 0x143 at all
+    self.braking_with_the_acc(-1.)
+    seen = self.send(-1.)[1]
+    self.send(-1.5)
+    self.pedal()
+    self.send(-2.)
+    assert self.send(0., active=False)[:2] == (13, seen)
+
+  def test_an_easing_brake_holds_the_last_of_it(self):
+    self.braking_with_the_acc(-2.)
+    self.send(-1.8)
+    self.send(-1.6)
+    last = self.send(-1.4)[1]
+    self.pedal()
+    assert self.send(0., active=False)[:2] == (13, last)
+
+  def test_the_pedal_with_openpilot_still_on_holds_nothing(self):
+    self.braking_with_the_acc(-1.)
+    self.pedal()
+    assert self.send(.5)[0] == 12
+
+  def test_openpilot_back_on_ends_it(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    self.send(0., active=False)
+    assert self.send(.5)[0] == 12
+
+  def test_a_brake_at_zero_holds_nothing(self):
+    # the panda only opens on a real brake: every frame of a try would be refused
+    self.braking_with_the_acc(-.5)
+    for _ in range(80):
+      self.send(-.01)
+    self.pedal()
+    assert self.send(0., active=False) == (4, 0, 0)
+
+  def test_the_camera_on_the_brake_also_goes_to_the_pedal(self):
+    self.stock(13)
+    self.pedal()
+    assert self.send(0., active=False) == (4, 0, 0)
+
+  def test_the_pedal_mode_goes_with_its_own_fields(self):
+    # in 21 422 frames the camera's mode 4 is always 0, 3, 0, and these fields decide how the car brakes
+    self.stock(12)
+    frame = bytearray(self.CS.longitudinal_stock_data)
+    frame[27] = (4 << 5)
+    frame[29] = 0x80
+    self.CS.longitudinal_stock_data = bytes(frame)
+    self.pedal()
+    out = self.frame(0., active=False)
+    assert (out[9] & 0x1F, (out[12] >> 5) & 1, out[27] >> 5, out[29] >> 7) == (4, 0, 3, 0)
+
+  def test_the_output_tells_the_brake_of_the_handoff(self):
+    self.braking_with_the_acc()
+    self.pedal()
+    CC = structs.CarControl()
+    new_actuators = self.cc.update(CC.as_reader(), self.CS, 0)[0]
+    new_actuators = self.cc.update(CC.as_reader(), self.CS, 0)[0]
+    assert new_actuators.accel == -2.
+
   def test_no_dead_zone_in_the_gas(self):
     assert self.send(0.3)[2] > 300
     assert self.send(0.5)[2] == 725
