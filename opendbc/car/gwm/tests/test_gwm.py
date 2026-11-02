@@ -374,6 +374,20 @@ class TestGwmLongitudinal:
     new_actuators = self.cc.update(CC.as_reader(), self.CS, 0)[0]
     assert new_actuators.accel == -2.
 
+  def test_on_a_descent_the_brake_asks_only_for_the_plan(self):
+    # in the brake mode the car holds the deceleration by itself on any slope: real = 0.95 x asked - 0.03 x slope, 17 542 frames.
+    # Adding the slope again braked at -1.3 with the plan asking for +0.5
+    descent = -0.13  # rad, 7.4 degrees
+    for _ in range(300):
+      self.send(-1., descent)
+    assert self.send(-1., descent)[1] == round(41 + 1. / 3.5 * 66)
+
+  def test_a_descent_still_chooses_the_brake(self):
+    descent = -0.13
+    for _ in range(300):
+      out = self.send(.5, descent)
+    assert out[0] == 13 and out[1] == 41  # holds the speed, doesn't add braking
+
   def test_no_dead_zone_in_the_gas(self):
     assert self.send(0.3)[2] > 300
     assert self.send(0.5)[2] == 725
@@ -472,7 +486,7 @@ class TestGwmLongitudinal:
     assert self.settle(0.5, climb)[2] > flat[2]
     self.setup_method()
     mode, brake, gas = self.settle(0., math.atan(-.14))
-    assert mode == 13 and brake > 41 and gas == 0
+    assert mode == 13 and brake == 41 and gas == 0  # with no braking asked, on the brake mode the car holds the speed: -0.04 m/s² on descents
 
   def test_mild_deceleration_eases_off_the_engine_before_the_brake(self):
     mode, brake, gas = self.send(-0.14)

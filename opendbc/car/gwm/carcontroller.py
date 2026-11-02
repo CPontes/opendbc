@@ -169,6 +169,9 @@ class CarController(CarControllerBase):
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         was_braking = self.braking
         self.braking = CC.longActive and (brake_wanted or brake_held)
+        if self.braking and not standstill:
+          # the slope only chooses the brake: from there the car holds the deceleration by itself on any slope, and adding it again brakes twice
+          self.accel = float(np.clip(min(actuators.accel, 0.), CarControllerParams.ACCEL_MIN, 0.))
         # the pedal takes a moment to build pressure: until the car drops the ACC our brake stays, as its own does
         pedal = CS.out.brakePressed and not CS.out.gasPressed
         level = max(self.brake_sent)  # the weakest of them: asking for more than the panda saw is refused, and no 0x143 goes out at all
