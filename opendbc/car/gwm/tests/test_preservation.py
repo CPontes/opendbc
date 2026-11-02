@@ -69,14 +69,15 @@ class TestGwmPreservation(unittest.TestCase):
     rng = random.Random(19)
     for active in [False, True]:
       for standstill in [False, True]:
-        for accel in [-1, -0.01, 0, 0.25, 1]:
+        for accel in [-3.5, -0.01, 0, 0.5, 2]:
+          braking = accel < 0
           original = rng.randbytes(64)
-          addr, output, bus = gwmcan.create_longitudinal_command(self.packer, self.bus, original, accel, active, standstill)
+          addr, output, bus = gwmcan.create_longitudinal_command(self.packer, self.bus, original, accel, braking, active, standstill)
           self.assertEqual((addr, bus), (0x143, 0))
           self.assert_unchanged(original, output, {8:0xff, 9:0x1f, 12:0x20, 13:0xff, 24:0xff, 27:0xff, 28:0xff, 29:0x80})
           self.assertEqual(output[16:24], original[16:24])
-          expected_brake = math.floor(accel * 66 - 41 + 0.5) if active and accel < 0 else 0
-          expected_gas = math.floor(max(0, min(1, (accel - 0.25) / 0.75)) * 4577 + 0.5) if active and accel >= 0 else 0
+          expected_brake = math.floor(accel / 3.5 * 66 - 41 + 0.5) if active and braking else 0
+          expected_gas = {0: 100, 0.5: 725, 2: 3000}.get(accel, 0) if active and not braking else 0
           self.assertEqual(output[13] - 181, expected_brake)
           self.assertEqual(((output[27] & 31) << 8 | output[28]) - 192, expected_gas)
           self.assertEqual(output[8], gwmcan.checksum(output[9:16], 0xef))

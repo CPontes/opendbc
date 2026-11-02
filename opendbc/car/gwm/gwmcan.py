@@ -1,8 +1,13 @@
 import numpy as np
 from opendbc.car import CanBusBase
 from opendbc.can.packer import set_value
+from opendbc.car.gwm.values import CarControllerParams
 
 STALK_MAX_COUNTER = 14  # 0xA1 counts 0 to 14, 15 never shows up on the bus
+
+# The gas the Haval's own ACC asks for each acceleration: 212 min of its commands, with the slope taken out
+ACC_GAS_ACCEL = [-0.05, 0., 0.1, 0.2, 0.35, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2.]  # m/s^2
+ACC_GAS = [0, 100, 215, 330, 545, 725, 1105, 1440, 1900, 2215, 2555, 3000]
 
 
 class CanBus(CanBusBase):
@@ -59,17 +64,17 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
   return 0x12B, dat, CAN.main
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, active, standstill):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill):
   values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
             ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
   brake_cmd = accel_cmd = 0
-  if accel < 0 and active:
+  if braking and active:
     values.update(BRAKE_OR_GAS_REQ=13, STANDSTILL_1=int(standstill),
                   STANDSTILL_2=3 if standstill else 4, STANDSTILL_3=0 if standstill else 1)
-    brake_cmd = (accel * (107 - 41)) - 41
+    brake_cmd = (-min(accel, 0.) / CarControllerParams.ACCEL_MIN * (107 - 41)) - 41
   elif active:
     values.update(BRAKE_OR_GAS_REQ=12, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
-    accel_cmd = np.interp(accel, [0.25, 1], [0, 4577])
+    accel_cmd = np.interp(accel, ACC_GAS_ACCEL, ACC_GAS)
   values.update(BRAKE_CMD=brake_cmd, GAS_CMD=accel_cmd)
   dat = _update_fields(packer, "ACC_CMD", longitudinal_stock_data, values)
   dat = _update_fields(packer, "ACC_CMD", dat, {

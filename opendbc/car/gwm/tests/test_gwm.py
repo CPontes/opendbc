@@ -1,7 +1,11 @@
+import math
 from types import SimpleNamespace
+
+import numpy as np
 
 from opendbc.can.dbc import DBC
 from opendbc.car import structs
+from opendbc.car.gwm import gwmcan
 from opendbc.car.gwm.interface import CarInterface
 from opendbc.car.gwm.values import CAR, DBC as GWM_DBC
 from opendbc.car import Bus
@@ -203,3 +207,77 @@ class TestGwmResume:
   def test_no_original_frame_no_cancel(self):
     self.CS.steer_and_ap_stalk_msg = None
     assert self._stalk_frames(5, resume=False, cancel=True) == (0, 0)
+
+
+class TestGwmLongitudinal:
+  def setup_method(self):
+    CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
+    CP.openpilotLongitudinalControl = True
+    self.cc = CarInterface(CP).CC
+    dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
+    self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None,
+                              longitudinal_stock_data=zeros(dbc, "ACC_CMD"), steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"),
+                              acc_waiting=False, acc_driving=False, stalk_idle=True)
+
+  def send(self, accel, pitch=0., state=None, active=True):
+    CC = structs.CarControl()
+    CC.enabled = active
+    CC.longActive = active
+    CC.actuators.accel = accel
+    CC.actuators.longControlState = state if state is not None else structs.CarControl.Actuators.LongControlState.pid
+    CC.orientationNED = [0., pitch, 0.]
+    frame = None
+    for _ in range(2):
+      for addr, dat, _bus in self.cc.update(CC.as_reader(), self.CS, 0)[1]:
+        if addr == 0x143:
+          frame = dat
+    mode = frame[9] & 0x1F
+    return mode, 181 - frame[13], ((frame[27] & 0x1F) << 8 | frame[28]) - 192
+
+  def settle(self, accel, pitch=0.):
+    for _ in range(300):
+      out = self.send(accel, pitch)
+    return out
+
+  def test_no_dead_zone_in_the_gas(self):
+    assert self.send(0.3)[2] > 300
+    assert self.send(0.5)[2] == 725
+    assert self.send(1.)[2] == 1440
+
+  def test_gas_and_brake_stay_inside_what_the_panda_allows(self):
+    for accel in np.arange(-5., 5., .1):
+      _, brake, gas = self.send(float(accel))
+      assert brake <= 107 and 0 <= gas <= 4577
+
+  def test_more_acceleration_never_means_less_gas(self):
+    assert list(gwmcan.ACC_GAS) == sorted(gwmcan.ACC_GAS) and len(gwmcan.ACC_GAS) == len(gwmcan.ACC_GAS_ACCEL)
+
+  def test_a_request_around_zero_does_not_flip_gas_and_brake(self):
+    modes = [self.send(a)[0] for a in [0.05, -0.05, -0.2, 0.05, -0.1, -0.2, 0.] * 10]
+    assert set(modes) == {12}
+    self.send(-0.3)
+    modes = [self.send(a)[0] for a in [-0.2, -0.3, -0.15, -0.26, -0.11] * 10]
+    assert set(modes) == {13}
+
+  def test_the_brake_lets_go_once_the_request_comes_back(self):
+    assert self.send(-0.5)[0] == 13
+    assert self.send(-0.05)[0] == 12
+
+  def test_a_climb_asks_for_more_and_a_descent_brakes(self):
+    climb = math.atan(.07)
+    flat = self.settle(0.5)
+    self.setup_method()
+    assert self.settle(0.5, climb)[2] > flat[2]
+    self.setup_method()
+    mode, brake, gas = self.settle(0., math.atan(-.14))
+    assert mode == 13 and brake > 41 and gas == 0
+
+  def test_the_slope_is_left_out_of_a_stop(self):
+    stopping = structs.CarControl.Actuators.LongControlState.stopping
+    self.settle(0., math.atan(.1))
+    assert self.send(-0.75, math.atan(.1), stopping)[0] == 13
+
+  def test_inactive_asks_for_nothing(self):
+    assert self.send(1., active=False)[1:] == (0, 0)
+    self.send(-2.)
+    assert self.send(-2., active=False)[1:] == (0, 0)

@@ -1,6 +1,9 @@
+import math
+
 import numpy as np
 from opendbc.can.packer import CANPacker
-from opendbc.car import Bus, structs
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, structs
+from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.lateral import apply_meas_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.gwm import gwmcan
@@ -14,6 +17,10 @@ CANCEL_FRAMES = 13  # the driver's pushes last 0.13 s
 CANCEL_WAIT = 100  # frames, before pushing again if the ACC is still driving
 MINUS_FRAMES = 13  # the driver's presses last 0.09 to 0.18 s
 MINUS_GAP = 35  # frames between presses: the driver's are 0.35 s apart, and the set speed reads back at 10 Hz
+# Between these the last of gas or brake stays: a request around zero flipped them 76 times a minute. The Haval's own ACC
+# goes to the brake around -0.23 m/s^2, comes back around -0.16 and changes 7 times a minute
+BRAKE_ON = -0.25  # m/s^2
+BRAKE_OFF = -0.1  # m/s^2
 
 
 class CarController(CarControllerBase):
@@ -25,6 +32,8 @@ class CarController(CarControllerBase):
     self.lat_active = False  # what the EPS was last asked to do, not just what openpilot wants
     self.CAN = gwmcan.CanBus(CP)
     self.accel = 0.0
+    self.braking = False
+    self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
     self.resume_frames = 0
     self.cancel_frames = 0
@@ -35,6 +44,8 @@ class CarController(CarControllerBase):
   def update(self, CC, CS, now_nanos):
     can_sends = []
     actuators = CC.actuators
+    if len(CC.orientationNED) == 3:
+      self.pitch.update(CC.orientationNED[1])
     # Only let go when the driver steers against openpilot. In tight curves the driver usually helps in the
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
@@ -119,16 +130,17 @@ class CarController(CarControllerBase):
       # Longitudinal control
       if self.CP.openpilotLongitudinalControl and CS.longitudinal_stock_data is not None:
         standstill = actuators.longControlState == LongCtrlState.stopping
-        self.accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-        if self.accel < 0:
-          accel = - abs(self.accel / CarControllerParams.ACCEL_MIN)
-        else:
-          accel = self.accel / CarControllerParams.ACCEL_MAX
+        accel = actuators.accel
+        if actuators.longControlState == LongCtrlState.pid:  # the slope, before the car has to speed up or slow down to show it
+          accel += math.sin(self.pitch.x) * ACCELERATION_DUE_TO_GRAVITY
+        self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+        self.braking = CC.longActive and (standstill or self.accel < (BRAKE_OFF if self.braking else BRAKE_ON))
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
           longitudinal_stock_data=CS.longitudinal_stock_data,
-          accel=accel,
+          accel=self.accel,
+          braking=self.braking,
           active=CC.longActive,
           standstill=standstill,
         ))
