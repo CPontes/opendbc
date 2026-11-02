@@ -2,10 +2,12 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from opendbc.can.dbc import DBC
 from opendbc.car import structs
 from opendbc.car.gwm import gwmcan
+from opendbc.car.gwm.carstate import CarState
 from opendbc.car.gwm.interface import CarInterface
 from opendbc.car.gwm.values import CAR, DBC as GWM_DBC
 from opendbc.car import Bus
@@ -13,6 +15,29 @@ from opendbc.car import Bus
 
 def zeros(dbc, msg):
   return bytes(dbc.name_to_msg[msg].size)
+
+
+class TestGwmLeadDistance:
+  def setup_method(self):
+    self.CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
+    self.cp = CarState.get_can_parsers(self.CP)[Bus.cam]
+
+  def frame(self, raw):
+    dat = bytearray(64)
+    dat[33], dat[34] = 0xF0 | (raw >> 8), raw & 0xFF  # the upper half of the byte is something else
+    return (0x2B8, bytes(dat), 2)
+
+  def test_the_distance_of_the_haval(self):
+    self.cp.update([(1000, [self.frame(1000)])])
+    assert self.cp.vl["UNDEFINED_INTERESTING_SIGNALS"]["LEAD_DISTANCE"] == pytest.approx(1000 * .0534 + 3.7)
+
+  def test_none_reads_the_zero_of_the_field(self):
+    self.cp.update([(1000, [self.frame(0)])])
+    assert self.cp.vl["UNDEFINED_INTERESTING_SIGNALS"]["LEAD_DISTANCE"] == pytest.approx(3.7)
+
+  def test_losing_it_is_no_fault(self):
+    # it only helps: a car or a moment without it must not take the ACC down
+    assert self.cp.message_states[0x2B8].ignore_alive
 
 
 class TestGwmCarController:
