@@ -30,6 +30,11 @@ BRAKE_RELEASE = 0.1  # m/s^2
 BRAKE_HOLD_MIN_SPEED = 5.  # m/s, under this it would keep the car from leaving a stop: up to 1.5 s without gas
 # Under the same speed a request to slow down keeps the brake, however small. Letting go of it left the car's creep holding it
 # at 1.5 km/h: it never got to the stop, and rolled onto the crosswalk until the driver braked
+# Out of the brake the gas starts from coasting and climbs, as the stock ACC does (-192, then under 100 a second later). Going
+# straight to +230 pushed the car on, and on a mild descent the next brake came in under 3 s half of the time. A request
+# for more than GAS_RAMP_MAX is the car really wanted to go, and nothing holds it back
+GAS_RAMP_RATE = 0.5  # m/s^3
+GAS_RAMP_MAX = 0.4  # m/s^2
 # Moderate braking builds slowly enough for regen to take it, as the stock ACC does: under 1 m/s^3 in 434 brake
 # applications. Harder braking isn't limited
 BRAKE_RAMP_RATE = 1.0  # m/s^3
@@ -48,6 +53,7 @@ class CarController(CarControllerBase):
     self.braking = False
     self.brake_accel_last = 0.0
     self.brake_hold = 0.
+    self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
     self.resume_frames = 0
@@ -159,6 +165,14 @@ class CarController(CarControllerBase):
         if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
         self.brake_accel_last = min(self.accel, 0.)
+        if self.braking:
+          self.gas_ramp = gwmcan.ACC_GAS_ACCEL[0]
+        elif self.gas_ramp is not None:
+          self.gas_ramp += GAS_RAMP_RATE * DT_CTRL * self.params.STEER_STEP
+          if not CC.longActive or self.accel >= GAS_RAMP_MAX or self.gas_ramp >= self.accel or CS.out.vEgo <= BRAKE_HOLD_MIN_SPEED:
+            self.gas_ramp = None
+          else:
+            self.accel = self.gas_ramp
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,

@@ -290,6 +290,27 @@ class TestGwmLongitudinal:
     self.settle(-0.5, descent)
     assert self.send(0.25, descent)[0] == 12
 
+  def test_out_of_the_brake_the_gas_climbs_from_coasting(self):
+    self.settle(-0.5)
+    mode, _, gas = self.send(0.2)
+    assert mode == 12 and gas < -100
+    assert [self.send(0.2)[2] for _ in range(50)][-1] == 330  # 1 s later
+
+  def test_a_real_request_for_gas_is_not_held_back(self):
+    self.settle(-0.5)
+    assert self.send(1.)[2] == 1440
+
+  def test_leaving_a_stop_has_no_climb(self):
+    self.CS.out.vEgo = 1.
+    self.settle(-0.5)
+    assert self.send(0.2)[2] == 330
+
+  def test_past_the_climb_gas_moves_freely(self):
+    self.settle(-0.5)
+    for _ in range(100):
+      self.send(0.2)
+    assert self.send(0.35)[2] == 545
+
   def test_held_on_the_brake_with_nothing_asked_it_does_not_brake(self):
     self.settle(-0.5)
     mode, brake, gas = self.send(0.05)
