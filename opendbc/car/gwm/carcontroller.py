@@ -28,6 +28,8 @@ BRAKE_OFF = -0.1  # m/s^2
 BRAKE_HOLD_TIME = 2.  # s
 BRAKE_RELEASE = 0.1  # m/s^2
 BRAKE_HOLD_MIN_SPEED = 5.  # m/s, under this it would keep the car from leaving a stop: up to 1.5 s without gas
+# Under the same speed a request to slow down keeps the brake, however small. Letting go of it left the car's creep holding it
+# at 1.5 km/h: it never got to the stop, and rolled onto the crosswalk until the driver braked
 # Moderate braking builds slowly enough for regen to take it, as the stock ACC does: under 1 m/s^3 in 434 brake
 # applications. Harder braking isn't limited
 BRAKE_RAMP_RATE = 1.0  # m/s^3
@@ -149,7 +151,8 @@ class CarController(CarControllerBase):
         if actuators.longControlState == LongCtrlState.pid and (slope < 0 or accel > 0):
           accel += slope
         self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-        brake_wanted = standstill or self.accel < (BRAKE_OFF if self.braking else BRAKE_ON)
+        brake_off = 0. if CS.out.vEgo <= BRAKE_HOLD_MIN_SPEED and actuators.accel < 0. else BRAKE_OFF
+        brake_wanted = standstill or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         self.braking = CC.longActive and (brake_wanted or brake_held)

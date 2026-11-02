@@ -278,6 +278,18 @@ class TestGwmLongitudinal:
     self.settle(-0.5)
     assert self.send(0.05)[0] == 12
 
+  def test_rolling_slowly_stays_on_the_brake_until_the_request_turns(self):
+    self.CS.out.vEgo = 1.
+    self.settle(-0.5)
+    assert {self.send(-0.05)[0] for _ in range(300)} == {13}
+    assert self.send(0.)[0] == 12
+
+  def test_leaving_a_stop_on_a_descent_does_not_wait_for_the_slope(self):
+    self.CS.out.vEgo = 1.
+    descent = math.atan(-.03)
+    self.settle(-0.5, descent)
+    assert self.send(0.25, descent)[0] == 12
+
   def test_held_on_the_brake_with_nothing_asked_it_does_not_brake(self):
     self.settle(-0.5)
     mode, brake, gas = self.send(0.05)
