@@ -218,6 +218,7 @@ class TestGwmLongitudinal:
     self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None,
                               longitudinal_stock_data=zeros(dbc, "ACC_CMD"), steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"),
                               acc_waiting=False, acc_driving=False, stalk_idle=True)
+    self.CS.out.vEgo = 11.
 
   def send(self, accel, pitch=0., state=None, active=True):
     frame = self.frame(accel, pitch, state, active)
@@ -262,9 +263,43 @@ class TestGwmLongitudinal:
     modes = [self.send(a)[0] for a in [-0.2, -0.3, -0.15, -0.26, -0.11] * 10]
     assert set(modes) == {13}
 
-  def test_the_brake_lets_go_once_the_request_comes_back(self):
+  def test_the_brake_lets_go_once_gas_is_asked(self):
     assert self.send(-0.5)[0] == 13
-    assert self.send(-0.05)[0] == 12
+    assert self.send(0.2)[0] == 12
+
+  def test_an_eased_brake_stays_on_the_brake_for_a_while(self):
+    self.settle(-0.5)
+    modes = [self.send(-0.05)[0] for _ in range(95)]  # 1.9 s
+    assert set(modes) == {13}
+    assert [self.send(-0.05)[0] for _ in range(10)][-1] == 12
+
+  def test_leaving_a_stop_never_waits_on_the_brake(self):
+    self.CS.out.vEgo = 1.
+    self.settle(-0.5)
+    assert self.send(0.05)[0] == 12
+
+  def test_held_on_the_brake_with_nothing_asked_it_does_not_brake(self):
+    self.settle(-0.5)
+    mode, brake, gas = self.send(0.05)
+    assert mode == 13 and brake == 41 and gas == 0
+
+  def test_a_new_request_in_the_hold_builds_up_and_a_hard_one_is_not_held_back(self):
+    self.settle(-0.5)
+    for _ in range(50):
+      self.send(0.05)
+    assert self.brake_at(15, -0.2) > 44  # 0.3 s in
+    self.setup_method()
+    self.settle(-0.5)
+    for _ in range(50):
+      self.send(0.05)
+    assert self.send(-3.5)[1] == 107
+
+  def test_braking_again_restarts_the_hold(self):
+    self.settle(-0.5)
+    for _ in range(90):
+      self.send(-0.05)
+    self.send(-0.5)
+    assert {self.send(-0.05)[0] for _ in range(90)} == {13}
 
   def test_a_climb_asks_for_more_and_a_descent_brakes(self):
     climb = math.atan(.07)

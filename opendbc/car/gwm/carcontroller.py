@@ -21,6 +21,13 @@ MINUS_GAP = 35  # frames between presses: the driver's are 0.35 s apart, and the
 # goes to the brake around -0.23 m/s^2, comes back around -0.16 and changes 7 times a minute
 BRAKE_ON = -0.25  # m/s^2
 BRAKE_OFF = -0.1  # m/s^2
+# An eased brake waits on the brake with nothing asked, unless gas is really wanted. Going straight to the gas left the car
+# still slowing and asking for more, and the next brake came in under 3 s half of the time: on a mild descent, pulses of
+# 0.8 s every 2 s the driver felt as pinching the pedal. The Haval's own ACC stays on the brake for 3 s, and comes back to it
+# in under 3 s only 22% of the time
+BRAKE_HOLD_TIME = 2.  # s
+BRAKE_RELEASE = 0.1  # m/s^2
+BRAKE_HOLD_MIN_SPEED = 5.  # m/s, under this it would keep the car from leaving a stop: up to 1.5 s without gas
 # Moderate braking builds slowly enough for regen to take it, as the stock ACC does: under 1 m/s^3 in 434 brake
 # applications. Harder braking isn't limited
 BRAKE_RAMP_RATE = 1.0  # m/s^3
@@ -38,6 +45,7 @@ class CarController(CarControllerBase):
     self.accel = 0.0
     self.braking = False
     self.brake_accel_last = 0.0
+    self.brake_hold = 0.
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
     self.resume_frames = 0
@@ -141,10 +149,13 @@ class CarController(CarControllerBase):
         if actuators.longControlState == LongCtrlState.pid and (slope < 0 or accel > 0):
           accel += slope
         self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-        self.braking = CC.longActive and (standstill or self.accel < (BRAKE_OFF if self.braking else BRAKE_ON))
+        brake_wanted = standstill or self.accel < (BRAKE_OFF if self.braking else BRAKE_ON)
+        self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
+        brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
+        self.braking = CC.longActive and (brake_wanted or brake_held)
         if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
-        self.brake_accel_last = self.accel if self.braking else min(self.accel, 0.)
+        self.brake_accel_last = min(self.accel, 0.)
         can_sends.append(gwmcan.create_longitudinal_command(
           self.packer,
           self.CAN,
