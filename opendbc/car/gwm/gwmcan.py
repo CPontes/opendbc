@@ -4,6 +4,7 @@ from opendbc.can.packer import set_value
 from opendbc.car.gwm.values import CarControllerParams
 
 STALK_MAX_COUNTER = 14  # 0xA1 counts 0 to 14, 15 never shows up on the bus
+STEER_MAX_COUNTER = 14  # the camera's 0x12B too: 15 was ours, on 1 of every 15 frames
 
 # The gas the Haval's own ACC asks for each acceleration: 212 min of its commands, with the slope taken out.
 # Below zero it's less engine torque, down to coasting: the stock ACC spends 14% of its time there
@@ -57,7 +58,7 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
     "TORQUE_CMD": steer,
     "TORQUE_REFLECTED": -steer,
     "INVERT_DIRECTION": int(steer > 0 and steer_req),
-    "COUNTER": (_get_value(packer, "STEER_CMD", camera_stock_data, "COUNTER") + 1) % 16,
+    "COUNTER": (_get_value(packer, "STEER_CMD", camera_stock_data, "COUNTER") + 1) % (STEER_MAX_COUNTER + 1),
   }
   dat = _update_fields(packer, "STEER_CMD", camera_stock_data, values)
   dat = _update_fields(packer, "STEER_CMD", dat, {"BASIC_CHECKSUM": gwm_basic_chksum_for_0x12B(dat)})
