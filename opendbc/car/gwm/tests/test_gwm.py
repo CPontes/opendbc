@@ -9,7 +9,7 @@ from opendbc.car import structs
 from opendbc.car.gwm import gwmcan
 from opendbc.car.gwm.carstate import CarState
 from opendbc.car.gwm.interface import CarInterface
-from opendbc.car.gwm.values import CAR, DBC as GWM_DBC
+from opendbc.car.gwm.values import CAR, DBC as GWM_DBC, GwmFlags
 from opendbc.car import Bus
 
 
@@ -91,6 +91,100 @@ class TestGwmCarController:
     # slow corners need all of it: low speed wobble is filtered in the request, not here
     assert abs(self._steer(1.0, 0, frames=200, v_ego=10 / 3.6)) == 253
     assert abs(self._steer(1.0, 0, frames=200, v_ego=40 / 3.6)) == 253
+
+
+class TestGwmSoftHandoff(TestGwmCarController):
+  # a light push against openpilot fades its torque out at the panda's rate; a firm one still lets go at once
+  def setup_method(self):
+    super().setup_method()
+    CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
+    CP.flags |= GwmFlags.SOFT_HANDOFF.value
+    self.cc = CarInterface(CP).CC
+
+  def _run(self, steps):
+    """steps: (frames, driver torque); returns what went out at each 50 Hz frame and whether it was requested"""
+    CC = structs.CarControl()
+    CC.latActive = CC.enabled = True
+    CC.actuators.torque = 1.0
+    CC = CC.as_reader()
+    self.CS.out.vEgo = 15.
+    out, applied = [], 0
+    for frames, driver in steps:
+      self.CS.out.steeringTorque = driver
+      for _ in range(frames):
+        self.CS.out.steeringTorqueEps = applied
+        actuators, _ = self.cc.update(CC, self.CS, 0)
+        if self.cc.frame % 2 == 1:  # the frame that just ran sent the steering
+          applied = actuators.torqueOutputCan
+          out.append((applied, self.cc.lat_active))
+    return out
+
+  def test_a_light_push_fades_at_the_panda_rate(self):
+    out = self._run([(200, 0), (20, -120)])
+    assert out[-11][0] == 253
+    fade = [o[0] for o in out[-10:]]
+    assert all(0 <= a - b <= 6 for a, b in zip([253] + fade, fade, strict=False))
+    assert fade[-1] == 253 - 6 * 10
+    assert all(o[1] for o in out[-10:])  # still requested while there is torque
+
+  def test_held_it_reaches_zero_and_lets_go(self):
+    out = self._run([(200, 0), (100, -120)])  # 1 s
+    assert out[-1] == (0, False)
+    assert max(i for i, o in enumerate(out) if o[0] > 0) - out.index((253, True)) < 200 + 43
+
+  def test_a_short_push_keeps_most_and_comes_back_from_there(self):
+    out = self._run([(200, 0), (30, -120), (1, 0)])
+    assert out[-1][0] >= 253 - 6 * 15 and out[-1][1]
+    out = self._run([(60, 0)])
+    assert out[-1][0] == 253  # back to the top in 0.6 s: from zero it takes 1.3 s
+
+  def test_just_under_firm_still_fades(self):
+    out = self._run([(200, 0), (2, -149)])
+    assert out[-1] == (253 - 6, True)
+
+  def test_a_push_around_1_nm_never_cuts(self):
+    out = self._run([(200, 0)] + [(2, -101), (2, -99)] * 10)
+    assert all(o[1] for o in out[-20:]) and min(o[0] for o in out[-20:]) >= 253 - 6 * 10
+
+  def test_the_end_of_the_fade_is_zero_never_one(self):
+    # the last step can land on 1: the EPS faults on a repeated 1, and 1 is no torque anyway
+    self.cc.apply_torque_last = 7
+    out = self._run([(2, -120)])
+    assert out[-1] == (0, False)  # 7 - 6 = 1 goes out as 0, and the request with it
+
+  def test_a_firm_push_lets_go_at_once(self):
+    assert self._run([(200, 0), (2, -150)])[-1] == (0, False)
+
+  def test_a_light_push_turning_firm_lets_go_at_once(self):
+    out = self._run([(200, 0), (10, -120), (2, -160)])
+    assert out[-2][0] > 0 and out[-1] == (0, False)
+
+  def test_lets_go_when_driver_opposes(self):
+    # with the soft handoff a firm push still lets go
+    assert self._steer(-1.0, 150) == 0
+    assert self._steer(1.0, -150) == 0
+
+  def test_no_request_when_driver_opposes(self):
+    self._steer(1.0, -150)
+    assert not self.cc.lat_active
+    self._steer(1.0, 150)
+    assert self.cc.lat_active
+
+  def test_without_openpilot_steering_nothing_fades(self):
+    CC = structs.CarControl()
+    CC.enabled = True
+    CC.actuators.torque = 1.0
+    self._run([(200, 0)])
+    self.CS.out.steeringTorque = -120
+    actuators, _ = self.cc.update(CC.as_reader(), self.CS, 0)
+    actuators, _ = self.cc.update(CC.as_reader(), self.CS, 0)
+    assert actuators.torqueOutputCan == 0 and not self.cc.lat_active
+
+
+class TestGwmSoftHandoffOff(TestGwmCarController):
+  def test_off_by_default_a_light_push_cuts(self):
+    self._steer(1.0, 0, frames=200)
+    assert self._steer(1.0, -120, frames=2) == 0
 
 
 class TestGwmSteerFault:

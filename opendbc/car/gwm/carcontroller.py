@@ -8,11 +8,17 @@ from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.lateral import apply_meas_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.gwm import gwmcan
-from opendbc.car.gwm.values import CarControllerParams
+from opendbc.car.gwm.values import CarControllerParams, GwmFlags
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
+# With the soft handoff, a push under this fades openpilot's torque at STEER_DELTA_DOWN (0.84 s from the top; the panda
+# would take it faster) and it comes
+# back from where it was. 70% of the pushes between 1.0 and 1.5 Nm lasted under 1 s, a correction: cut, the torque took
+# 1.0 to 1.2 s to come back and the wheel fell back 3 to 18 degrees. 79 to 100% of the firmer ones lasted over 1 s,
+# taking over: those still let go at once (16 routes, 988 cuts)
+SOFT_HANDOFF_MAX_TORQUE = 150  # 1.5 Nm
 RESUME_FRAMES = 13  # at 100 Hz: the driver's pulls last 0.10 to 0.16 s
 CANCEL_FRAMES = 13  # the driver's pushes last 0.13 s
 CANCEL_WAIT = 100  # frames, before pushing again if the ACC is still driving
@@ -75,7 +81,10 @@ class CarController(CarControllerBase):
     # Only let go when the driver steers against openpilot. In tight curves the driver usually helps in the
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
-    lat_active = CC.latActive and not (abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing)
+    pushing = abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing
+    lat_active = CC.latActive and not pushing
+    fading = CC.latActive and pushing and bool(self.CP.flags & GwmFlags.SOFT_HANDOFF) and \
+             abs(CS.out.steeringTorque) < SOFT_HANDOFF_MAX_TORQUE
 
     # Increment counter so cancel is prioritized even without openpilot longitudinal
     # A push like the driver's, only with the ACC driving a moving car. At a stop it holds the car and only leaves
@@ -123,12 +132,14 @@ class CarController(CarControllerBase):
       # Between transmit cycles, keep the state of the last emitted command.
       self.lat_active = False
       # Steer command
-      new_torque = int(round(actuators.torque * self.params.STEER_MAX))
+      new_torque = 0 if fading else int(round(actuators.torque * self.params.STEER_MAX))
       apply_torque = apply_meas_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorqueEps, self.params)
       # Prevent sending the same 'apply_torque = 1' torque repeatedly, as it can cause EPS faults.
       if abs(apply_torque) == 1:
-        apply_torque = apply_torque * 2
-      if not lat_active or CS.camera_stock_data is None:
+        apply_torque = 0 if fading else apply_torque * 2
+      # fading out, the request stays until the torque is gone
+      steer_req = lat_active or (fading and apply_torque != 0)
+      if not steer_req or CS.camera_stock_data is None:
         apply_torque = 0
       if CS.camera_stock_data is not None:
         can_sends.append(gwmcan.create_steer_command(
@@ -136,9 +147,9 @@ class CarController(CarControllerBase):
           self.CAN,
           camera_stock_data=CS.camera_stock_data,
           steer=apply_torque,
-          steer_req=lat_active,
+          steer_req=steer_req,
         ))
-        self.lat_active = lat_active
+        self.lat_active = steer_req
       self.apply_torque_last = apply_torque
 
       # Satisfy steer nudge requests

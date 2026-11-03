@@ -21,6 +21,12 @@ class CarControllerParams:
     self.STEER_ERROR_MAX = 80
 
 
+class GwmFlags(IntFlag):
+  # Hexa: a light push against openpilot fades its torque out instead of cutting it. Not a panda flag: the panda takes
+  # any fade down with the request on
+  SOFT_HANDOFF = 1
+
+
 class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
   ALWAYS_ON_LATERAL = 2  # brake pauses longitudinal only, steering stays engaged until cancel
