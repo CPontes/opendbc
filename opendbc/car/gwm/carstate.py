@@ -8,6 +8,9 @@ ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 
+WHEELS = ("FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT")
+WHEEL_BACKWARD = 5  # the 3 bits above each wheel speed: 3 going forward, 7 stopped, 5 going backward (in R, and in D only rolling back)
+
 STALK_BUTTONS = ("AP_CANCEL_COMMAND", "AP_ENABLE_COMMAND", "AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND",
                  "AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND")
 
@@ -36,6 +39,7 @@ class CarState(CarStateBase):
     self.acc_driving = False
     self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
+    self.rolling_back = False
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.main]
@@ -54,6 +58,9 @@ class CarState(CarStateBase):
       cp.vl["WHEEL_SPEEDS"]["REAR_LEFT_WHEEL_SPEED"],
       cp.vl["WHEEL_SPEEDS"]["REAR_RIGHT_WHEEL_SPEED"]
     )
+
+    # two wheels, as one may tell the car is stopped for a moment longer: they turn to 5 within 0.1 s of each other
+    self.rolling_back = sum(cp.vl["WHEEL_SPEEDS"][f"{w}_WHEEL_DIRECTION"] == WHEEL_BACKWARD for w in WHEELS) >= 2
 
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     self.acc_waiting = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 2

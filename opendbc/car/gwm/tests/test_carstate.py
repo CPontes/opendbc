@@ -283,6 +283,25 @@ class TestSignals:
     ret = car.step(WHEEL_SPEEDS=dict.fromkeys(WHEELS, 36))
     assert not ret.standstill and ret.vEgoRaw == pytest.approx(10., abs=0.01)
 
+  @pytest.mark.parametrize("codes, back", [((3, 3, 3, 3), False), ((7, 7, 7, 7), False), ((5, 7, 7, 7), False),
+                                            ((5, 7, 5, 7), True), ((5, 5, 5, 5), True)])
+  def test_rolling_back_takes_two_wheels_going_backward(self, codes, back):
+    # route 34, 30.28 min: 7777 stopped, 5757 then 5555 rolling back in D
+    car = Car()
+    dirs = ("FRONT_LEFT_WHEEL_DIRECTION", "FRONT_RIGHT_WHEEL_DIRECTION", "REAR_LEFT_WHEEL_DIRECTION", "REAR_RIGHT_WHEEL_DIRECTION")
+    car.step(WHEEL_SPEEDS=dict(zip(dirs, codes, strict=True)) | dict.fromkeys(WHEELS, 0.3))
+    assert car.CI.CS.rolling_back == back
+
+  def test_the_direction_bits_sit_above_the_wheel_speeds(self):
+    # the bytes as they come from the car: 0x13B with 5 on the front left and right and 0.36 km/h on every wheel
+    car = Car()
+    dat = bytearray(64)
+    for i in (1, 3, 41, 43):
+      dat[i], dat[i + 1] = 0xA0, 6
+    car.CI.update([(10_000_000, [(0x13B, bytes(dat), 0)])])
+    assert car.CI.CS.rolling_back
+    assert car.CI.CS.out.vEgoRaw == pytest.approx(0.36 / 3.6, abs=0.01)
+
   def test_acc_fault(self):
     car = Car()
     assert car.step(ACC={"CRUISE_STATE_2": 0}).accFaulted
