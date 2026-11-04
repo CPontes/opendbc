@@ -48,14 +48,19 @@ GAS_RAMP_MAX = 0.4  # m/s^2
 BRAKE_RAMP_RATE = 1.0  # m/s^3
 BRAKE_RAMP_MIN = -1.0  # m/s^2
 HANDOFF_TIME = 0.18  # s, under the 0.2 of the panda. The stock ACC brakes on for 0.1 s after the pedal, until it drops
-# At the end of a stop the stock ACC goes to its hold mode, at 0.9 km/h and 0.7 s before the wheels stop (median of 90 stops),
-# and the car finishes the stop on the friction brake: 415 of pressure when the wheels stop. Once stopped the pressure stays
-# where it got to, whatever is asked. Ours finished on regen, and on a 2 degree climb it got to 59 and rolled back 17 cm
-# (route 34, 30.28 min). From there its request climbs to -2.12 in 2.7 s, and it leaves straight to the gas: 73 stops and 79
-# departures, none rolling back
+# At the end of a stop the stock ACC goes to its hold mode, at 0.9 km/h and 0.7 s before the wheels stop (median of 90 stops).
+# There the car keeps the friction brake it has and adds to it: 415 of pressure when the wheels stop, and it stays there
+# whatever is asked, in none of 54 stops under 233. On 13 ours kept 289, but it lost it standing: under 50 within 2 s in 6 of
+# 143 stops, with nobody asking to go. Arriving on regen on a 2 degree climb it had 59 and rolled back 17 cm (route 34, 30.28
+# min). The stock request climbs to -2.12 in 2.7 s, and it leaves straight to the gas: 79 departures, none rolling back
 HOLD_SPEED = 0.25  # m/s
 HOLD_ACCEL = -2.12  # m/s^2
 HOLD_RAMP_RATE = 0.6  # m/s^3
+# Rolling back is a car at a crawl: 0.4 km/h in the one we saw. Faster, the 5 would be a bad reading, and the hold mode is
+# never used moving. Once the wheels stop the hold stays a moment, for the pressure to build as at the end of a stock stop
+# (0.74 s from the hold mode to the stop): let go at once, a gas that didn't hold the climb would roll it back again
+ROLLBACK_MAX_SPEED = 1.  # m/s
+ROLLBACK_HOLD_TIME = 1.  # s
 
 
 class CarController(CarControllerBase):
@@ -75,6 +80,7 @@ class CarController(CarControllerBase):
     self.handoff_accel = 0.
     self.handoff_hold = False
     self.holding = False
+    self.rollback_left = 0.  # s
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -185,9 +191,17 @@ class CarController(CarControllerBase):
           accel += slope
         self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         brake_off = 0. if CS.out.vEgo <= BRAKE_HOLD_MIN_SPEED and actuators.accel < 0. else BRAKE_OFF
-        # rolling back in D the car is never left on the gas or loose: it holds, and openpilot drives on once it has stopped
-        rolling_back = CS.rolling_back and CS.out.gearShifter == GearShifter.drive and not CS.out.gasPressed
-        brake_wanted = standstill or rolling_back or self.accel < (brake_off if self.braking else BRAKE_ON)
+        # rolling back in D the car is never left on the gas or loose: it holds, and openpilot drives on a moment after it stops
+        in_drive = CS.out.gearShifter == GearShifter.drive and not CS.out.gasPressed and CC.longActive
+        rolling_back = CS.rolling_back and in_drive and CS.out.vEgo < ROLLBACK_MAX_SPEED
+        if rolling_back:
+          self.rollback_left = ROLLBACK_HOLD_TIME
+        elif not in_drive:
+          self.rollback_left = 0.
+        else:
+          self.rollback_left = max(self.rollback_left - DT_CTRL * self.params.STEER_STEP, 0.)
+        rolled_back = rolling_back or self.rollback_left > 0.
+        brake_wanted = standstill or rolled_back or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         was_braking = self.braking
@@ -206,9 +220,17 @@ class CarController(CarControllerBase):
         self.handoff_left = max(self.handoff_left - DT_CTRL * self.params.STEER_STEP, 0.)
         if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
-        self.holding = self.braking and (rolling_back or (standstill and (self.holding or CS.out.vEgo < HOLD_SPEED)))
+        # it starts stopping, and stays while there's braking near a stop: a frame out of stopping must not drop it to regen
+        near_stop = CS.out.vEgo < HOLD_SPEED
+        self.holding = self.braking and (rolled_back or (standstill and (self.holding or near_stop)) or (self.holding and near_stop))
         if self.holding:
-          hold = HOLD_ACCEL if rolling_back else max(self.brake_accel_last - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
+          if rolled_back:
+            hold = HOLD_ACCEL
+          elif CS.out.brakePressed:
+            # the panda takes its level at the pedal and refuses more: the hold stops climbing until openpilot lets go
+            hold = self.brake_accel_last
+          else:
+            hold = max(self.brake_accel_last - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
           self.accel = min(self.accel, hold)
         self.brake_accel_last = min(self.accel, 0.)
         if self.braking:

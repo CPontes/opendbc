@@ -680,6 +680,31 @@ class TestGwmLongitudinal:
     self.stop(frames=10)
     assert self.stop(v_ego=0.4)[0] == 25
 
+  def test_a_braking_frame_out_of_the_stop_keeps_the_hold(self):
+    # a should_stop that flickers: one pid frame asking a little braking must not drop the hold to regen
+    self.stop(frames=200)
+    self.CS.out.vEgo = 0.
+    assert self.send(-0.05)[:2] == (25, 81)
+    assert self.stop(v_ego=0.)[:2] == (25, 81)
+
+  def test_the_hold_does_not_follow_a_car_moving_on(self):
+    self.stop(frames=200)
+    self.CS.out.vEgo = 1.
+    assert self.send(-0.5)[0] == 13
+
+  def test_the_hold_ends_with_openpilot(self):
+    self.stop(frames=50)
+    self.stop(active=False)
+    assert self.stop(v_ego=0.4)[0] == 13
+
+  def test_with_the_pedal_the_hold_stops_climbing(self):
+    self.stop(frames=50)
+    self.pedal()
+    climbing = [self.stop()[1] for _ in range(20)]
+    assert len(set(climbing)) == 1
+    self.pedal(False)
+    assert self.stop(frames=60)[1] > climbing[0]
+
   def test_a_stop_above_the_hold_speed_is_not_held(self):
     assert {self.stop(v_ego=v)[0] for v in (5., 2., 1., 0.3)} == {13}
 
@@ -711,11 +736,47 @@ class TestGwmLongitudinal:
     self.rolling_back()
     assert self.send(-3.)[1] == 98
 
-  def test_once_stopped_openpilot_drives_on(self):
+  def test_once_stopped_it_holds_a_moment_and_openpilot_drives_on(self):
     self.rolling_back()
     self.send(0.3)
     self.CS.rolling_back = False
     self.CS.out.vEgo = 0.
+    modes = [self.send(0.3)[0] for _ in range(60)]
+    assert modes[:49] == [25] * 49 and modes[-1] == 12  # 1 s at 50 Hz
+
+  def test_rolling_back_again_restarts_the_moment(self):
+    self.rolling_back()
+    self.send(0.3)
+    self.CS.rolling_back = False
+    for _ in range(40):
+      self.send(0.3)
+    self.CS.rolling_back = True
+    self.send(0.3)
+    self.CS.rolling_back = False
+    assert {self.send(0.3)[0] for _ in range(45)} == {25}
+
+  def test_rolling_back_is_only_at_a_crawl(self):
+    self.settle(0.3)
+    self.rolling_back()
+    self.CS.out.vEgo = 20.
+    assert self.send(0.3)[0] == 12
+
+  @pytest.mark.parametrize("gear", ["neutral", "park", "unknown"])
+  def test_out_of_drive_is_no_rolling_back(self, gear):
+    self.rolling_back(gear=getattr(structs.CarState.GearShifter, gear))
+    assert self.send(0.3)[0] == 12
+
+  def test_rolling_back_without_openpilot_asks_for_nothing(self):
+    self.rolling_back()
+    assert self.send(0.3, active=False)[1:] == (0, 0)
+
+  def test_the_moment_ends_with_the_gas_pedal(self):
+    self.rolling_back()
+    self.send(0.3)
+    self.CS.rolling_back = False
+    self.CS.out.gasPressed = True
+    self.send(0.3)
+    self.CS.out.gasPressed = False
     assert self.send(0.3)[0] == 12
 
   def test_reverse_and_the_gas_pedal_are_no_rolling_back(self):

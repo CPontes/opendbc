@@ -293,7 +293,7 @@ class TestSignals:
     assert car.CI.CS.rolling_back == back
 
   def test_the_direction_bits_sit_above_the_wheel_speeds(self):
-    # the bytes as they come from the car: 0x13B with 5 on the front left and right and 0.36 km/h on every wheel
+    # the bytes as they come from the car: 0x13B with 5 and 0.36 km/h on every wheel
     car = Car()
     dat = bytearray(64)
     for i in (1, 3, 41, 43):
