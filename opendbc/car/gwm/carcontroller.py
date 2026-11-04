@@ -11,6 +11,7 @@ from opendbc.car.gwm import gwmcan
 from opendbc.car.gwm.values import CarControllerParams, GwmFlags
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+GearShifter = structs.CarState.GearShifter
 
 MAX_USER_TORQUE = 100  # 1.0 Nm
 # With the soft handoff, a push under this fades openpilot's torque at STEER_DELTA_DOWN (0.84 s from the top; the panda
@@ -47,6 +48,14 @@ GAS_RAMP_MAX = 0.4  # m/s^2
 BRAKE_RAMP_RATE = 1.0  # m/s^3
 BRAKE_RAMP_MIN = -1.0  # m/s^2
 HANDOFF_TIME = 0.18  # s, under the 0.2 of the panda. The stock ACC brakes on for 0.1 s after the pedal, until it drops
+# At the end of a stop the stock ACC goes to its hold mode, at 0.9 km/h and 0.7 s before the wheels stop (median of 90 stops),
+# and the car finishes the stop on the friction brake: 415 of pressure when the wheels stop. Once stopped the pressure stays
+# where it got to, whatever is asked. Ours finished on regen, and on a 2 degree climb it got to 59 and rolled back 17 cm
+# (route 34, 30.28 min). From there its request climbs to -2.12 in 2.7 s, and it leaves straight to the gas: 73 stops and 79
+# departures, none rolling back
+HOLD_SPEED = 0.25  # m/s
+HOLD_ACCEL = -2.12  # m/s^2
+HOLD_RAMP_RATE = 0.6  # m/s^3
 
 
 class CarController(CarControllerBase):
@@ -64,6 +73,8 @@ class CarController(CarControllerBase):
     self.brake_sent = deque([None] * 3, maxlen=3)  # the panda takes its level at the pedal, frames before openpilot lets go
     self.handoff_left = 0.  # s
     self.handoff_accel = 0.
+    self.handoff_hold = False
+    self.holding = False
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -174,7 +185,9 @@ class CarController(CarControllerBase):
           accel += slope
         self.accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
         brake_off = 0. if CS.out.vEgo <= BRAKE_HOLD_MIN_SPEED and actuators.accel < 0. else BRAKE_OFF
-        brake_wanted = standstill or self.accel < (brake_off if self.braking else BRAKE_ON)
+        # rolling back in D the car is never left on the gas or loose: it holds, and openpilot drives on once it has stopped
+        rolling_back = CS.rolling_back and CS.out.gearShifter == GearShifter.drive and not CS.out.gasPressed
+        brake_wanted = standstill or rolling_back or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         was_braking = self.braking
@@ -186,13 +199,17 @@ class CarController(CarControllerBase):
         pedal = CS.out.brakePressed and not CS.out.gasPressed
         # the weakest of them: asking for more than the panda saw is refused, and no 0x143 goes out at all
         if pedal and CS.acc_driving and was_braking and not CC.longActive and None not in self.brake_sent:
-          self.handoff_left, self.handoff_accel = HANDOFF_TIME, max(self.brake_sent)
+          self.handoff_left, self.handoff_accel, self.handoff_hold = HANDOFF_TIME, max(self.brake_sent), self.holding
         elif not pedal or not CS.acc_driving or CC.longActive:
           self.handoff_left = 0.
         handing_off = self.handoff_left > 0.
         self.handoff_left = max(self.handoff_left - DT_CTRL * self.params.STEER_STEP, 0.)
         if self.braking and not standstill and self.accel > BRAKE_RAMP_MIN:
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
+        self.holding = self.braking and (rolling_back or (standstill and (self.holding or CS.out.vEgo < HOLD_SPEED)))
+        if self.holding:
+          hold = HOLD_ACCEL if rolling_back else max(self.brake_accel_last - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
+          self.accel = min(self.accel, hold)
         self.brake_accel_last = min(self.accel, 0.)
         if self.braking:
           self.gas_ramp = gwmcan.ACC_GAS_ACCEL[0]
@@ -214,6 +231,7 @@ class CarController(CarControllerBase):
           active=CC.longActive or handing_off,
           standstill=standstill,
           pedal=pedal,
+          hold=self.holding or (handing_off and self.handoff_hold),
         ))
 
     if self.frame % 5 == 0 and CS.hud_stock_data is not None: # 20 Hz

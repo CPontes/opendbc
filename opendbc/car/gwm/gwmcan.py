@@ -11,6 +11,11 @@ STEER_MAX_COUNTER = 14  # the camera's 0x12B too: 15 was ours, on 1 of every 15 
 ACC_GAS_ACCEL = [-0.14, -0.1, -0.05, 0., 0.1, 0.2, 0.35, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2.]  # m/s^2
 ACC_GAS = [-192, -100, -25, 60, 215, 330, 545, 725, 1105, 1440, 1900, 2215, 2555, 3000]
 
+# BRAKE_OR_GAS_REQ
+MODE_GAS = 12
+MODE_BRAKE = 13
+MODE_HOLD = 25  # the end of a stop and the stop itself, on the friction brake
+
 
 class CanBus(CanBusBase):
   def __init__(self, CP=None, fingerprint=None) -> None:
@@ -66,17 +71,18 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
   return 0x12B, dat, CAN.main
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False, hold=False):
   values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
             ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
   brake_cmd = accel_cmd = 0
   if braking and active:
     # the camera always sends these while braking, not only stopped. With 4 and 1 the car used the friction brakes
     # for everything: 10 times the hydraulic pressure of the stock ACC at the same deceleration, and no regen
-    values.update(BRAKE_OR_GAS_REQ=13, STANDSTILL_1=int(standstill), STANDSTILL_2=3, STANDSTILL_3=0)
+    # the hold is the same frame with its own mode, as the camera sends it at the end of a stop
+    values.update(BRAKE_OR_GAS_REQ=MODE_HOLD if hold else MODE_BRAKE, STANDSTILL_1=int(standstill or hold), STANDSTILL_2=3, STANDSTILL_3=0)
     brake_cmd = (-min(accel, 0.) / CarControllerParams.ACCEL_MIN * (107 - 41)) - 41
   elif active:
-    values.update(BRAKE_OR_GAS_REQ=12, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
+    values.update(BRAKE_OR_GAS_REQ=MODE_GAS, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
     accel_cmd = np.interp(accel, ACC_GAS_ACCEL, ACC_GAS)
   elif pedal and values["BRAKE_OR_GAS_REQ"] in (12, 13):
     # the camera is a moment behind the pedal: never a frame of gas between our brake and the driver's

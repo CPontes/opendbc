@@ -336,7 +336,7 @@ class TestGwmLongitudinal:
     dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
     self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None,
                               longitudinal_stock_data=zeros(dbc, "ACC_CMD"), steer_and_ap_stalk_msg=zeros(dbc, "STEER_AND_AP_STALK"),
-                              acc_waiting=False, acc_driving=False, stalk_idle=True)
+                              acc_waiting=False, acc_driving=False, stalk_idle=True, rolling_back=False)
     self.CS.out.vEgo = 11.
 
   def send(self, accel, pitch=0., state=None, active=True):
@@ -649,6 +649,89 @@ class TestGwmLongitudinal:
     stopping = structs.CarControl.Actuators.LongControlState.stopping
     self.settle(0., math.atan(.1))
     assert self.send(-0.75, math.atan(.1), stopping)[0] == 13
+
+  def stop(self, accel=-0.75, v_ego=0.2, frames=1, active=True):
+    stopping = structs.CarControl.Actuators.LongControlState.stopping
+    self.CS.out.vEgo = v_ego
+    return [self.send(accel, state=stopping, active=active) for _ in range(frames)][-1]
+
+  def test_the_end_of_a_stop_is_the_stock_hold(self):
+    self.stop(v_ego=1.)
+    assert self.stop(v_ego=1.)[0] == 13
+    frame = self.frame(-0.75, state=structs.CarControl.Actuators.LongControlState.stopping)
+    self.CS.out.vEgo = 0.2
+    frame = self.frame(-0.75, state=structs.CarControl.Actuators.LongControlState.stopping)
+    # the camera's own: 25, standstill 1, 3 and 0, no gas
+    assert frame[9] & 0x1F == 25 and frame[12] >> 5 & 1 == 1 and frame[27] >> 5 == 3 and frame[29] >> 7 == 0
+    assert ((frame[27] & 0x1F) << 8 | frame[28]) - 192 == 0
+
+  def test_the_hold_climbs_to_the_stock_request_in_about_two_seconds(self):
+    assert self.stop()[1] == 55  # -0.75 to start with
+    brakes = [self.stop()[1] for _ in range(150)]
+    assert brakes[49] in (65, 66, 67)  # 1 s in: -1.35 m/s^2
+    assert brakes.index(81) in range(105, 120)  # -2.12, like the camera's 100
+    assert max(brakes) == 81 and brakes == sorted(brakes)
+
+  def test_the_hold_never_eases_a_harder_request(self):
+    assert self.stop(-3.)[1] == 98
+    assert self.stop(-3.5)[1] == 107
+
+  def test_once_holding_a_speed_reading_does_not_end_it(self):
+    self.stop(frames=10)
+    assert self.stop(v_ego=0.4)[0] == 25
+
+  def test_a_stop_above_the_hold_speed_is_not_held(self):
+    assert {self.stop(v_ego=v)[0] for v in (5., 2., 1., 0.3)} == {13}
+
+  def test_leaving_the_hold_goes_straight_to_the_gas(self):
+    self.stop(frames=200)
+    self.CS.out.vEgo = 0.
+    mode, brake, gas = self.send(0.3)
+    assert mode == 12 and brake == 0 and gas > 0
+
+  def test_the_hold_is_only_for_openpilot_driving(self):
+    assert self.stop(active=False)[1:] == (0, 0)
+
+  def rolling_back(self, gear=structs.CarState.GearShifter.drive, gas=False):
+    self.CS.rolling_back = True
+    self.CS.out.gearShifter = gear
+    self.CS.out.gasPressed = gas
+    self.CS.out.vEgo = 0.1
+
+  def test_rolling_back_in_drive_holds_at_once(self):
+    self.settle(0.3)
+    self.rolling_back()
+    assert self.send(0.3)[:2] == (25, 81)
+    self.setup_method()
+    self.stop(frames=2)
+    self.rolling_back()
+    assert self.stop(v_ego=0.1)[:2] == (25, 81)
+
+  def test_rolling_back_never_eases_a_harder_request(self):
+    self.rolling_back()
+    assert self.send(-3.)[1] == 98
+
+  def test_once_stopped_openpilot_drives_on(self):
+    self.rolling_back()
+    self.send(0.3)
+    self.CS.rolling_back = False
+    self.CS.out.vEgo = 0.
+    assert self.send(0.3)[0] == 12
+
+  def test_reverse_and_the_gas_pedal_are_no_rolling_back(self):
+    self.rolling_back(gear=structs.CarState.GearShifter.reverse)
+    assert self.send(0.3)[0] == 12
+    self.setup_method()
+    self.rolling_back(gas=True)
+    assert self.send(0.3)[0] == 12
+
+  def test_the_pedal_takes_over_from_the_hold_in_its_mode(self):
+    self.CS.acc_driving = True
+    self.stock(12)
+    self.stop(frames=200)
+    self.pedal()
+    frames = [self.frame(0., active=False) for _ in range(9)]
+    assert {(f[9] & 0x1F, 181 - f[13], f[12] >> 5 & 1) for f in frames} == {(25, 81, 1)}
 
   def test_inactive_asks_for_nothing(self):
     assert self.send(1., active=False)[1:] == (0, 0)
