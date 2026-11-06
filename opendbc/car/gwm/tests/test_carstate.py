@@ -406,6 +406,52 @@ class Selfdrived:
     return len(releases)
 
 
+class TestButtons:
+  """The ACC's own buttons reach openpilot as button events, read only: the stock ACC acts on them by itself."""
+
+  @staticmethod
+  def events(ret):
+    return [(be.type, be.pressed) for be in ret.buttonEvents]
+
+  @pytest.mark.parametrize("signal,button", [("AP_INCREASE_SPEED_COMMAND", ButtonType.accelCruise),
+                                             ("AP_DECREASE_SPEED_COMMAND", ButtonType.decelCruise)])
+  def test_speed_buttons(self, signal, button):
+    car = Car()
+    assert self.events(car.step(**{STALK: {signal: 1}})) == [(button, True)]
+    assert self.events(car.step(frames=5)) == []  # held: no repeat
+    assert self.events(car.step(**{STALK: {signal: 0}})) == [(button, False)]
+
+  @pytest.mark.parametrize("signal", ["AP_INCREASE_DISTANCE_COMMAND", "AP_REDUCE_DISTANCE_COMMAND"])
+  def test_distance_button_with_the_stock_acc(self, signal):
+    car = Car()
+    assert self.events(car.step(**{STALK: {signal: 1}})) == [(ButtonType.gapAdjustCruise, True)]
+    assert self.events(car.step(**{STALK: {signal: 0}})) == [(ButtonType.gapAdjustCruise, False)]
+
+  def test_no_distance_button_with_openpilot_longitudinal(self):
+    # the interface follows the car's distance setting with presses of its own: this one would step the personality twice
+    car = Car(long=True)
+    car.CI.current_personality = 0
+    assert not any(be.type == ButtonType.gapAdjustCruise for be in car.step(**{STALK: {"AP_INCREASE_DISTANCE_COMMAND": 1}}).buttonEvents)
+
+  def test_switching_plus_to_minus(self):
+    car = Car()
+    car.step(**{STALK: {"AP_INCREASE_SPEED_COMMAND": 1}})
+    ret = car.step(**{STALK: {"AP_INCREASE_SPEED_COMMAND": 0, "AP_DECREASE_SPEED_COMMAND": 1}})
+    assert self.events(ret) == [(ButtonType.accelCruise, False), (ButtonType.decelCruise, True)]
+
+  def test_no_events_idle_and_the_lever_is_no_speed_button(self):
+    car = Car()
+    assert self.events(car.step(frames=10)) == []
+    assert not any(be.type in (ButtonType.accelCruise, ButtonType.decelCruise) for be in car.lever().buttonEvents)
+
+  def test_buttons_do_not_change_the_engagement(self):
+    car = Car()
+    car.lever()
+    for signal in ("AP_INCREASE_SPEED_COMMAND", "AP_DECREASE_SPEED_COMMAND", "AP_INCREASE_DISTANCE_COMMAND"):
+      assert car.step(**{STALK: {signal: 1}}).cruiseState.enabled
+      assert car.step(**{STALK: {signal: 0}}).cruiseState.enabled
+
+
 class TestFollowDistance:
   def run(self, distance, bars, frames=300):
     car = Car(long=True)

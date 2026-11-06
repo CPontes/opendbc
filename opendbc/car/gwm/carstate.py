@@ -1,4 +1,4 @@
-from opendbc.car import Bus, CanBusBase, structs
+from opendbc.car import Bus, CanBusBase, create_button_events, structs
 from opendbc.can.parser import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
@@ -20,6 +20,11 @@ def get_stock_data(parser, name):
   data = parser.vl_raw.get(name)
   return data if data is not None and len(data) == parser.dbc.name_to_msg[name].size else None
 
+
+# the ACC's own buttons on the stalk, reported to openpilot as they are pressed. Read only: the stock ACC acts on them by itself,
+# and openpilot takes no action on them with the stock ACC (pcmCruise)
+SPEED_BUTTONS = {1: ButtonType.accelCruise, 2: ButtonType.decelCruise}
+GAP_BUTTONS = {1: ButtonType.gapAdjustCruise}
 
 ACC_OFF = 1  # CRUISE_STATE_2: the ACC is off. 2 is ready or waiting at a stop, 3 driving, 5 the driver's gas override
 ACC_OFF_FRAMES = 5  # 0x2AB frames (10 Hz), as the panda counts them
@@ -44,6 +49,8 @@ class CarState(CarStateBase):
     self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
     self.rolling_back = False
+    self.speed_button = 0
+    self.gap_button = 0
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.main]
@@ -110,6 +117,16 @@ class CarState(CarStateBase):
     ret.leftBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_LEFT"] > 0)
     ret.rightBlindspot = bool(cp.vl["RADAR_BEHIND"]["BSM_RIGHT"] > 0)
 
+    stalk = cp.vl["STEER_AND_AP_STALK"]
+    speed_button = 1 if stalk["AP_INCREASE_SPEED_COMMAND"] else 2 if stalk["AP_DECREASE_SPEED_COMMAND"] else 0
+    gap_button = int(bool(stalk["AP_INCREASE_DISTANCE_COMMAND"] or stalk["AP_REDUCE_DISTANCE_COMMAND"]))
+    button_events = create_button_events(speed_button, self.speed_button, SPEED_BUTTONS)
+    # with openpilot longitudinal the interface already follows the car's distance setting with presses of its own: the
+    # physical one would step the personality twice
+    if not self.CP.openpilotLongitudinalControl:
+      button_events += create_button_events(gap_button, self.gap_button, GAP_BUTTONS)
+    self.speed_button, self.gap_button = speed_button, gap_button
+
     # with always-on lateral the brake only pauses longitudinal (handled in selfdrived), it doesn't disengage
     always_on_lateral = bool(self.CP.safetyConfigs[-1].safetyParam & GwmSafetyFlags.ALWAYS_ON_LATERAL)
     # the last frame too: the panda reads the stalk mid-update, it may not have seen the brake released yet
@@ -129,7 +146,7 @@ class CarState(CarStateBase):
     if lever_released and self.lever_pull_valid:
       if self.main_on and always_on_lateral:
         # lever pulled while engaged: resume longitudinal after a brake pause
-        ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise)]
+        button_events.append(structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise))
       self.main_on = True
     self.prev_activation_lever_pulled = self.is_activation_lever_pulled
 
@@ -144,6 +161,7 @@ class CarState(CarStateBase):
         self.main_on = self.lever_pull_valid = False
         self.acc_off_frames = 0
 
+    ret.buttonEvents = button_events
     ret.cruiseState.available = self.main_on
     ret.cruiseState.enabled = self.main_on
 
