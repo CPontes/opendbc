@@ -74,8 +74,8 @@ class TestGwmPreservation(unittest.TestCase):
           original = rng.randbytes(64)
           addr, output, bus = gwmcan.create_longitudinal_command(self.packer, self.bus, original, accel, braking, active, standstill)
           self.assertEqual((addr, bus), (0x143, 0))
-          # our brake and hold also own the top bits of byte 9, the camera's drive-off request: they go out as 0 (LONG-05)
-          ours = output[9] & 0x1f in (gwmcan.MODE_BRAKE, gwmcan.MODE_HOLD)
+          # out of the gas modes the top bits of byte 9, the camera's drive-off request, go out as 0 (LONG-05)
+          ours = output[9] & 0x1f not in (gwmcan.MODE_GAS, gwmcan.MODE_GAS_OVERRIDE)
           self.assert_unchanged(original, output, {8:0xff, 9:0xff if ours else 0x1f, 12:0x20, 13:0xff, 24:0xff, 27:0xff, 28:0xff, 29:0x80})
           if ours:
             self.assertEqual(output[9] >> 5, 0)

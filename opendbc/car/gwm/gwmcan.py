@@ -19,10 +19,11 @@ MODE_GAS = 12
 MODE_BRAKE = 13
 MODE_GAS_OVERRIDE = 20  # the driver on the gas with the ACC on
 MODE_HOLD = 25  # the end of a stop and the stop itself, on the friction brake
-# The three bits above BRAKE_OR_GAS_REQ in byte 9, unnamed in the DBC: the camera sets them to 2 only in the gas modes (12 and 20),
-# for an instant as it leaves a stop, and to 0 in every other mode (routes 0c, 16 and 41). It is its request to drive off: passed
-# on with our hold, the car let the brake go with the car still stopped, from ~500 of pressure to 0 in a second, and it rolled
-# back on a climb (route 41, 37.5 min; 18 of 25 pressure losses in routes 36 to 41). Our brake and hold never carry it (LONG-05)
+# The three bits above BRAKE_OR_GAS_REQ in byte 9, unnamed in the DBC: the camera sets them to 2 for an instant as it leaves a stop,
+# mostly in its gas modes (12 and 20: 1.5 to 2.7% of their frames) and now and then in 13 on the way out of its hold (4 to 18
+# frames a route), and never in 25, 8 or 4 (routes 0c, 16, 3b, 3c and 41). It is its request to drive off: passed on with our hold,
+# the car let the brake go with the car still stopped, from ~500 of pressure to 0 in a second, and it rolled back on a climb
+# (route 41, 37.5 min; 18 of 25 pressure losses in routes 36 to 41). Only the gas modes carry it, as the camera sends it (LONG-05)
 DRIVE_OFF_BYTE = 9
 DRIVE_OFF_MASK = 0xE0
 INACTIVE_MODES = (MODE_START, MODE_ACC_OFF, MODE_STANDBY, MODE_GAS_OVERRIDE)
@@ -109,7 +110,7 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, acc
     values.update(BRAKE_OR_GAS_REQ=MODE_GAS_OVERRIDE if gas_pedal else MODE_STANDBY)
   values.update(BRAKE_CMD=brake_cmd, GAS_CMD=accel_cmd)
   dat = _update_fields(packer, "ACC_CMD", longitudinal_stock_data, values)
-  if values["BRAKE_OR_GAS_REQ"] in (MODE_BRAKE, MODE_HOLD):
+  if values["BRAKE_OR_GAS_REQ"] not in (MODE_GAS, MODE_GAS_OVERRIDE):
     dat = bytearray(dat)
     dat[DRIVE_OFF_BYTE] &= ~DRIVE_OFF_MASK & 0xFF
     dat = bytes(dat)

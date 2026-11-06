@@ -968,6 +968,25 @@ class TestGwmAccMode(GwmStalkTest):
           self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)), (mode, stopped, pedal, gas_pedal))
         self._gas(0)
 
+  def test_the_cameras_drive_off_request_goes_only_with_the_gas(self):
+    # LONG-05: the camera's request to drive off (byte 9, top bits = 2) goes out only in the gas modes, as the camera sends it.
+    # Disengaged, its own hold of a stopped car keeps the brake, and our standby and pedal frames never carry it either
+    for stopped in (False, True):
+      self._speed(0 if stopped else 5)
+      for pedal, gas_pedal in ((False, False), (True, False), (False, True)):
+        if gas_pedal:
+          self._gas(10)
+        for mode in INACTIVE_MODES + ACTIVE_MODES:
+          stock = bytearray(self.packer.make_can_msg("ACC_CMD", 2, {"BRAKE_OR_GAS_REQ": mode, "BRAKE_CMD": -60, "GAS_CMD": 500})[1])
+          stock[9] |= 0x40
+          addr, dat, bus = gwmcan.create_longitudinal_command(self.packer, SimpleNamespace(main=0), bytes(stock), 0., False, False, False,
+                                                               pedal=pedal, gas_pedal=gas_pedal, stopped=stopped)
+          out = dat[9] & 0x1F
+          self.assertEqual(dat[9] >> 5, 2 if out in (12, 20) else 0, (mode, out, stopped, pedal, gas_pedal))
+          self.assertEqual(dat[8], gwmcan.checksum(dat[9:16], 0xEF))
+          self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)), (mode, stopped, pedal, gas_pedal))
+        self._gas(0)
+
 
 class TestGwmAccModeAlwaysOn(TestGwmAccMode):
   SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL

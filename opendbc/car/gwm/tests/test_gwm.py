@@ -742,6 +742,17 @@ class TestGwmLongitudinal:
     frame = self.frame(-1.5)
     assert frame[9] & 0x1F == 13 and frame[9] >> 5 == 0
 
+  def test_the_handoff_to_the_pedal_never_carries_it(self):
+    stopping = structs.CarControl.Actuators.LongControlState.stopping
+    self.stopped()
+    for _ in range(100):
+      self.frame(-0.75, state=stopping)
+    self.stock(12 | 0x40)
+    self.CS.acc_driving = True
+    self.pedal()
+    frame = self.frame(0., active=False)  # openpilot let go at the pedal: our brake stays a moment, in its mode
+    assert frame[9] & 0x1F in (13, 25) and frame[9] >> 5 == 0
+
   def test_our_gas_keeps_the_cameras_bits(self):
     # leaving a stop is the camera's own request too: on the gas it goes as the camera sends it
     self.CS.out.vEgo = 2.
