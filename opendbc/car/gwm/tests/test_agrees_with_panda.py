@@ -26,15 +26,20 @@ class Both:
     self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, param)
     self.safety.init_tests()
     self.counter = 0
+    self.brake_counter = 0
     self.nanos = 0
 
-  def step(self, lever, cancel, brake, brake_first):
+  def step(self, lever, cancel, brake, brake_first, acc=None):
     self.counter = (self.counter + 1) % 15
     _, dat, _ = self.packer.make_can_msg(STALK, 0, {"AP_ENABLE_COMMAND": lever, "AP_CANCEL_COMMAND": cancel, "COUNTER": self.counter})
     dat = bytes([checksum(dat[1:8], 0x2D)]) + dat[1:]
     frames = [(0xA1, dat, 0)]
     if brake is not None:
-      frames.append(self.packer.make_can_msg("BRAKE2", 0, {"PEDAL_BRAKE_PRESSED": brake}))
+      self.brake_counter = (self.brake_counter + 1) % 15
+      _, bdat, _ = self.packer.make_can_msg("BRAKE2", 0, {"PEDAL_BRAKE_PRESSED": brake, "COUNTER": self.brake_counter})
+      frames.append((0x120, bytes([checksum(bdat[1:8], 0xEE)]) + bdat[1:], 0))
+    if acc is not None:
+      frames.append(self.packer.make_can_msg("ACC", 2, {"CRUISE_STATE_2": acc}))
     # the car's frames land on the panda one at a time, CarState sees them as one batch
     for addr, data, bus in (reversed(frames) if brake_first else frames):
       assert self.safety.safety_rx_hook(libsafety_py.make_CANPacket(addr, bus, data))
@@ -51,6 +56,7 @@ def random_drive(param, seed):
   rng = random.Random(seed)
   both = Both(param)
   lever = cancel = brake = 0
+  acc = 3
   engagements = dropped = 0
   out = prev = False
   for i in range(3000):
@@ -65,7 +71,11 @@ def random_drive(param, seed):
       dropped += 1
       both.safety.set_controls_allowed(False)
     both.CI.CS.cancel_requested = out and prev
-    enabled, allowed = both.step(int(lever), int(cancel), None if i % 2 else int(brake), rng.random() < 0.5)
+    # the ACC at 10 Hz, now and then off for a while: dropped out, or a pull it never took
+    if i % 10 == 0 and rng.random() < 0.1:
+      acc = 1 if acc == 3 else 3
+    enabled, allowed = both.step(int(lever), int(cancel), None if i % 2 else int(brake), rng.random() < 0.5,
+                                 acc if i % 10 == 0 else None)
     out = out and enabled
     assert allowed or not enabled or out
     engagements += enabled and not prev

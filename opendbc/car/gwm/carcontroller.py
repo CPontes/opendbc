@@ -278,6 +278,8 @@ class CarController(CarControllerBase):
           standstill=standstill,
           pedal=pedal,
           hold=self.holding or (handing_off and self.handoff_hold),
+          gas_pedal=CS.out.gasPressed,
+          stopped=CS.out.standstill,
         ))
 
     if self.frame % 5 == 0 and CS.hud_stock_data is not None: # 20 Hz

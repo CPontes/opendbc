@@ -21,6 +21,9 @@ def get_stock_data(parser, name):
   return data if data is not None and len(data) == parser.dbc.name_to_msg[name].size else None
 
 
+ACC_OFF = 1  # CRUISE_STATE_2: the ACC is off. 2 is ready or waiting at a stop, 3 driving, 5 the driver's gas override
+ACC_OFF_FRAMES = 5  # 0x2AB frames (10 Hz), as the panda counts them
+
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
@@ -37,6 +40,7 @@ class CarState(CarStateBase):
     self.main_on = False
     self.acc_waiting = False
     self.acc_driving = False
+    self.acc_off_frames = 0
     self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
     self.rolling_back = False
@@ -128,6 +132,17 @@ class CarState(CarStateBase):
         ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.resumeCruise)]
       self.main_on = True
     self.prev_activation_lever_pulled = self.is_activation_lever_pulled
+
+    if lever_pressed:
+      self.acc_off_frames = 0  # every pull gives the ACC its time again, as in the panda
+    # the ACC off for 5 of its frames (0.5 s) while engaged ends it, frame by frame as the panda counts them: it dropped out,
+    # or never took the pull. Not with always-on lateral, which steers without the ACC by design
+    for state in cp_cam.vl_all["ACC"]["CRUISE_STATE_2"]:
+      engaging = (self.main_on or self.lever_pull_valid) and not always_on_lateral
+      self.acc_off_frames = self.acc_off_frames + 1 if (engaging and state == ACC_OFF) else 0
+      if self.acc_off_frames >= ACC_OFF_FRAMES:
+        self.main_on = self.lever_pull_valid = False
+        self.acc_off_frames = 0
 
     ret.cruiseState.available = self.main_on
     ret.cruiseState.enabled = self.main_on

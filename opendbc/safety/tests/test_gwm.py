@@ -44,8 +44,36 @@ def checksum(msg):
     ret[0] = _checksum(ret[1:], 0x2D)
   elif addr == 0x13B: # WHEEL_SPEEDS
     ret[0] = _checksum(ret[1:8], 0x7F)
+  elif addr == 0x60: # CAR_OVERALL_SIGNALS2: the gas pedal is in the second block
+    ret[8] = _checksum(ret[9:16], 0x95)
+  elif addr == 0x120: # BRAKE2
+    ret[0] = _checksum(ret[1:8], 0xEE)
+  elif addr == 0x147: # RX_STEER_RELATED: the EPS torque is in the second block
+    ret[8] = _checksum(ret[9:16], 0x61)
 
   return addr, ret, bus
+
+
+class GwmPacker(CANPackerSafety):
+  """Frames as the car sends them: the gas, brake and EPS frames with their CRC and a running counter, and our ACC command
+  with the mode that goes with its fields (the panda checks it)."""
+  COUNTED = {"CAR_OVERALL_SIGNALS2": "COUNTER2", "BRAKE2": "COUNTER", "RX_STEER_RELATED": "B_COUNTER"}
+
+  def __init__(self, dbc_name):
+    super().__init__(dbc_name)
+    self.counters = {}
+
+  def make_can_msg_safety(self, name_or_addr, bus, values, fix_checksum=None):
+    if name_or_addr in self.COUNTED and bus == 0:
+      signal = self.COUNTED[name_or_addr]
+      if signal not in values:
+        self.counters[name_or_addr] = (self.counters.get(name_or_addr, -1) + 1) % 15
+        values = {**values, signal: self.counters[name_or_addr]}
+      fix_checksum = fix_checksum or checksum
+    if name_or_addr == "ACC_CMD" and "BRAKE_OR_GAS_REQ" not in values:
+      mode = 13 if values.get("BRAKE_CMD", 0) else 12 if values.get("GAS_CMD", 0) else 8
+      values = {**values, "BRAKE_OR_GAS_REQ": mode}
+    return super().make_can_msg_safety(name_or_addr, bus, values, fix_checksum)
 
 
 class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, common.LongitudinalGasBrakeSafetyTest):
@@ -70,7 +98,7 @@ class TestGwmSafety(common.CarSafetyTest, common.MotorTorqueSteeringSafetyTest, 
   MAX_POSSIBLE_BRAKE = 180
 
   def setUp(self):
-    self.packer = CANPackerSafety(opendbc)
+    self.packer = GwmPacker(opendbc)
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL)
     self.safety.init_tests()
@@ -209,7 +237,7 @@ class GwmStalkTest(common.SafetyTestBase):
   SAFETY_PARAM = 0
 
   def setUp(self):
-    self.packer = CANPackerSafety(opendbc)
+    self.packer = GwmPacker(opendbc)
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.SAFETY_PARAM)
     self.safety.init_tests()
@@ -770,7 +798,7 @@ class TestGwmAlwaysOnLateral(common.SafetyTestBase):
   """Brake pauses longitudinal only, steering stays engaged until cancel; lever resumes longitudinal."""
 
   def setUp(self):
-    self.packer = CANPackerSafety(opendbc)
+    self.packer = GwmPacker(opendbc)
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL)
     self.safety.init_tests()
@@ -855,6 +883,215 @@ class TestGwmAlwaysOnLateral(common.SafetyTestBase):
     self.assertTrue(self.safety.get_controls_allowed())
     self._brake(1)
     self.assertFalse(self.safety.get_controls_allowed())
+
+# *** SAFE-02: the mode of our ACC command, CRC and counter on gas, brake and 0x147, and the ACC off ending the engagement ***
+
+INACTIVE_MODES = (0, 4, 8, 20)
+ACTIVE_MODES = (12, 13, 25)
+
+
+class TestGwmAccMode(GwmStalkTest):
+  """BRAKE_OR_GAS_REQ decides what the PCM does, whatever the gas and brake fields say: the hold mode brakes with a zero brake."""
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL
+
+  def _acc(self, mode, gas=0, brake=0):
+    return self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"BRAKE_OR_GAS_REQ": mode, "GAS_CMD": gas, "BRAKE_CMD": -brake}))
+
+  def test_disengaged_only_the_modes_that_dont_actuate(self):
+    self._speed(5)
+    for mode in range(32):
+      self.assertEqual(mode in INACTIVE_MODES, self._acc(mode), mode)
+
+  def test_engaged_the_gas_brake_and_hold_too(self):
+    self._engage()
+    for mode in range(32):
+      self.assertEqual(mode in INACTIVE_MODES + ACTIVE_MODES, self._acc(mode), mode)
+
+  def test_with_the_gas_pedal_only_the_modes_that_dont_actuate(self):
+    self._engage()
+    self._gas(10)
+    for mode in range(32):
+      self.assertEqual(mode in INACTIVE_MODES, self._acc(mode), mode)  # stopped too: the gas pedal ends the hold
+
+  def test_gas_only_in_the_gas_mode_brake_only_in_brake_and_hold(self):
+    self._engage()
+    for mode in INACTIVE_MODES + ACTIVE_MODES:
+      self.assertEqual(mode == 12, self._acc(mode, gas=60), mode)
+      self.assertEqual(mode == 12, self._acc(mode, gas=-192), mode)
+      self.assertEqual(mode in (13, 25), self._acc(mode, brake=41), mode)
+      self.assertFalse(self._acc(mode, gas=60, brake=41), mode)
+
+  def test_after_cancel_no_hold_moving(self):
+    self._engage()
+    self._speed(1)
+    self.assertTrue(self._acc(25, brake=80))
+    self._rx_stalk(AP_CANCEL_COMMAND=1)
+    self.assertFalse(self._acc(25))
+    self.assertFalse(self._acc(13))
+    self.assertTrue(self._acc(8))
+
+  def test_the_hold_of_a_stopped_car_stays_disengaged(self):
+    # the camera's own hold goes on as the canal always sent it: let go of, a car stopped on a climb rolls back
+    self._speed(0)
+    self.assertTrue(self._acc(25))
+    self.assertFalse(self._acc(25, brake=41))  # with no brake of ours
+    self._gas(10)
+    self.assertFalse(self._acc(25))  # nor with the gas pedal
+    self._gas(0)
+    self._speed(0.5)
+    self.assertFalse(self._acc(25))  # nor moving
+
+  def test_the_frame_of_the_car_port_passes_whatever_the_camera_does(self):
+    # disengaged: the camera's gas, brake or hold goes out as standby, its other modes as they are
+    # stopped and with no gas pedal, the camera's hold stays as it is
+    for stopped in (False, True):
+      self._speed(0 if stopped else 5)
+      for pedal, gas_pedal, expected in ((False, False, 8), (True, False, 4), (False, True, 20)):
+        if gas_pedal:
+          self._gas(10)
+        for mode in INACTIVE_MODES + ACTIVE_MODES:
+          stock = self.packer.make_can_msg("ACC_CMD", 2, {"BRAKE_OR_GAS_REQ": mode, "BRAKE_CMD": -60, "GAS_CMD": 500})[1]
+          addr, dat, bus = gwmcan.create_longitudinal_command(self.packer, SimpleNamespace(main=0), stock, 0., False, False, False,
+                                                               pedal=pedal, gas_pedal=gas_pedal, stopped=stopped)
+          kept = mode in INACTIVE_MODES or (mode == 25 and stopped and not gas_pedal)
+          self.assertEqual(dat[9] & 0x1F, mode if kept else expected, (mode, stopped, pedal, gas_pedal))
+          self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)), (mode, stopped, pedal, gas_pedal))
+        self._gas(0)
+
+
+class TestGwmAccModeAlwaysOn(TestGwmAccMode):
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL
+
+  def test_paused_by_the_brake_only_the_modes_that_dont_actuate(self):
+    # always-on lateral: the brake pauses longitudinal and steering stays. The hold must not come back with it
+    self._engage()
+    self._speed(5)
+    self._brake(1)
+    self._brake(0)
+    self.assertTrue(self.safety.get_controls_allowed())
+    for mode in range(32):  # moving: no hold
+      self.assertEqual(mode in INACTIVE_MODES, self._acc(mode), mode)
+
+
+class TestGwmHandoffMode(TestGwmBrakeHandoff):
+  """The handoff to the pedal keeps a brake that only comes down: in the brake mode, or the hold if it was holding. Never gas."""
+
+  def _hold(self, brake=70):
+    return self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"BRAKE_OR_GAS_REQ": 25, "BRAKE_CMD": -brake, "GAS_CMD": 0}))
+
+  def test_from_the_brake_no_hold(self):
+    self._pedal_while_braking(70)
+    self.assertFalse(self._hold(60))
+    self.assertTrue(self._long(60))
+
+  def test_from_the_hold_the_hold_or_the_brake(self):
+    self.assertTrue(self._hold(80))
+    self._brake(1)
+    self.assertTrue(self._hold(80))
+    self.assertTrue(self._long(70))
+    self.assertTrue(self._hold(60))
+
+  def test_no_gas_mode_with_no_gas(self):
+    self._pedal_while_braking(70)
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"BRAKE_OR_GAS_REQ": 12, "BRAKE_CMD": 0, "GAS_CMD": 0})))
+
+  def test_a_refused_frame_is_no_hold_before_it(self):
+    self.assertTrue(self._hold(80))
+    self.assertFalse(self._hold(108))  # over the limit: what the panda saw last is standby
+    self._brake(1)
+    self.assertFalse(self._hold(60))
+
+
+class TestGwmHandoffModeAlwaysOn(TestGwmHandoffMode, TestGwmBrakeHandoffAlwaysOn):
+  pass
+
+
+class TestGwmChecksums(GwmStalkTest):
+  """Gas (0x60), brake (0x120) and EPS torque (0x147): CRC and counter on every frame of the logs (crc_gwm.py), now checked."""
+
+  def test_good_frames_and_wrapping_counters_pass(self):
+    for counter in [13, 14, 0] * 10:
+      self.assertTrue(self._rx(self.packer.make_can_msg_safety("BRAKE2", 0, {"COUNTER": counter})))
+      self.assertTrue(self._rx(self.packer.make_can_msg_safety("CAR_OVERALL_SIGNALS2", 0, {"COUNTER2": counter})))
+      self.assertTrue(self._rx(self.packer.make_can_msg_safety("RX_STEER_RELATED", 0, {"B_COUNTER": counter})))
+
+  def test_a_bad_crc_is_refused(self):
+    for name, crc_byte in (("BRAKE2", 0), ("CAR_OVERALL_SIGNALS2", 8), ("RX_STEER_RELATED", 8)):
+      msg = self.packer.make_can_msg_safety(name, 0, {})
+      msg[0].data[crc_byte] ^= 0xFF
+      self.assertFalse(self._rx(msg), name)
+
+  def test_real_frames(self):
+    # as logged on a 2024 H6 GT PHEV, CRC and counter untouched: the panda takes them, and reads the gas pedal
+    gas_on = bytes.fromhex("5548180033803802d0023412034c8782e090641c395c4122ff000000000000004dffff3e1728000228787c0000000232ff00045700000800ff00000000000000")
+    brake = bytes.fromhex("027269411b00000c" + "00" * 56)
+    self.assertTrue(self._rx(libsafety_py.make_CANPacket(0x120, 0, brake)))
+    self.assertTrue(self._rx(libsafety_py.make_CANPacket(0x60, 0, gas_on)))
+    self.assertTrue(self.safety.get_gas_pressed_prev())
+
+
+class TestGwmAccOff(GwmStalkTest):
+  """The ACC off (CRUISE_STATE_2 = 1) for 5 of its frames (0.5 s) ends the engagement: it dropped out, or never took the pull."""
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.AUTO_RESUME | GwmSafetyFlags.ACC_MINUS | GwmSafetyFlags.ACC_PLUS
+
+  def _acc_state(self, state):
+    self._rx(self.packer.make_can_msg_safety("ACC", 2, {"CRUISE_STATE_2": state, "ACC_SPEED_SELECTION": 60}))
+
+  def _off_frames(self, n):
+    for _ in range(n):
+      self._acc_state(1)
+    self._rx_stalk()
+
+  def test_five_frames_end_it(self):
+    self._engage()
+    self._off_frames(4)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._off_frames(1)
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._engage()  # a new pull engages again
+
+  def test_a_new_pull_gives_the_acc_its_time_again(self):
+    self._engage()
+    self._off_frames(4)
+    self._engage()
+    self._off_frames(4)
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_off_before_the_pull_does_not_count(self):
+    self._off_frames(20)
+    self._engage()
+    self._off_frames(4)
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_the_acc_states_of_a_stop_and_a_hold_keep_it(self):
+    # 2 waiting at a stop or holding, 3 driving, 5 the driver's gas: never 1 in a stop
+    self._engage()
+    for state in (0, 2, 3, 5):
+      for _ in range(20):
+        self._acc_state(state)
+      self._rx_stalk()
+      self.assertTrue(self.safety.get_controls_allowed(), state)
+
+  def test_short_off_frames_never_add_up(self):
+    self._engage()
+    for i in range(100):
+      self._acc_state(1 if i % 4 == 0 else 3)
+      self._rx_stalk()
+    self.assertTrue(self.safety.get_controls_allowed())
+
+
+class TestGwmAccOffAlwaysOn(GwmStalkTest):
+  """Always-on lateral steers without the ACC by design: the ACC off ends nothing."""
+  SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL | GwmSafetyFlags.ALWAYS_ON_LATERAL
+
+  def test_the_acc_off_keeps_steering_and_longitudinal(self):
+    self._engage()
+    for _ in range(50):
+      self._rx(self.packer.make_can_msg_safety("ACC", 2, {"CRUISE_STATE_2": 1}))
+    self._rx_stalk()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self.packer.make_can_msg_safety("ACC_CMD", 0, {"BRAKE_OR_GAS_REQ": 13, "BRAKE_CMD": -60, "GAS_CMD": 0})))
+
 
 if __name__ == "__main__":
   unittest.main()

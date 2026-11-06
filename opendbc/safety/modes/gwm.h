@@ -26,6 +26,20 @@
 #define GWM_PLUS_MAX_KPH         110U  // the ACC's set speed: at or above this, no plus from openpilot (Brazil's highest limit)
 #define GWM_ACC_DRIVING            3U  // CRUISE_STATE_2 with the ACC in control
 
+#define GWM_ACC_OFF                1U  // CRUISE_STATE_2 with the ACC off
+#define GWM_ACC_OFF_FRAMES         5U  // 0x2AB frames (10 Hz) with the ACC off while engaged: it dropped out, so do we
+
+// BRAKE_OR_GAS_REQ of 0x143 [log]: 0 for a frame at start, 4 with the ACC off, 8 standing by, 12 on the gas, 13 on the brake,
+// 20 with the driver on the gas, 25 holding the car at a stop. The camera sends 12, 13 and 25 for a few frames with openpilot
+// disengaged too: the mode decides what the PCM does, so with openpilot not in control only the first four go out
+#define GWM_MODE_START             0U
+#define GWM_MODE_ACC_OFF           4U
+#define GWM_MODE_STANDBY           8U
+#define GWM_MODE_GAS              12U
+#define GWM_MODE_BRAKE            13U
+#define GWM_MODE_GAS_OVERRIDE     20U
+#define GWM_MODE_HOLD             25U
+
 #define GWM_BRAKE_ZERO              41  // the brake field with no braking in it
 #define GWM_BRAKE_HANDOFF_US    200000U  // a pedal takes about this to build pressure, and the stock ACC brakes on for 0.1 s
 
@@ -41,6 +55,11 @@ static int gwm_brake_last = 0;  // what the last frame that went out asked for
 static bool gwm_handoff = false;
 static int gwm_handoff_brake = 0;
 static uint32_t gwm_handoff_ts = 0U;
+static uint32_t gwm_mode_last = GWM_MODE_START;  // the mode of the last frame that went out
+static uint32_t gwm_handoff_mode = GWM_MODE_START;  // and the one when the pedal came: the handoff keeps it, or eases to the brake
+
+// the ACC off with openpilot engaged: it dropped out, or never took the pull (the stock ACC driving)
+static uint32_t gwm_acc_off_frames = 0U;
 
 // auto resume: one pull of the stalk per stop, with openpilot engaged and no pedal or button in use
 static bool gwm_auto_resume = false;
@@ -64,10 +83,22 @@ static uint32_t gwm_acc_state = 0U;  // CRUISE_STATE_2
 static bool gwm_stalk_tx_seen = false;
 static uint32_t gwm_stalk_tx_ts = 0U;
 
+// Each protected block is 8 bytes: the CRC in its first byte, the counter in the low nibble of its last.
+// The gas pedal is in the second block of 0x60 and the EPS torque in the second block of 0x147; the others are in the
+// first block of their message.
+static int gwm_block(const CANPacket_t *msg) {
+  return ((msg->addr == GWM_GAS) || (msg->addr == GWM_RX_STEER_RELATED)) ? 8 : 0;
+}
+
+static bool gwm_checked(const CANPacket_t *msg) {
+  return (msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION) || (msg->addr == GWM_GAS) || (msg->addr == GWM_BRAKE) ||
+         (msg->addr == GWM_RX_STEER_RELATED);
+}
+
 static uint8_t gwm_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
-  if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
-    cnt = msg->data[7] & 0xFU;
+  if (gwm_checked(msg)) {
+    cnt = msg->data[gwm_block(msg) + 7] & 0xFU;
   } else {
   }
   return cnt;
@@ -75,8 +106,8 @@ static uint8_t gwm_get_counter(const CANPacket_t *msg) {
 
 static uint32_t gwm_get_checksum(const CANPacket_t *msg) {
   uint8_t chksum = 0;
-  if ((msg->addr == GWM_SPEED) || (msg->addr == GWM_ADAS_ACTIVATION)) {
-    chksum = msg->data[0] & 0xFFU;
+  if (gwm_checked(msg)) {
+    chksum = msg->data[gwm_block(msg)] & 0xFFU;
   } else {
   }
   return chksum;
@@ -87,9 +118,10 @@ static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
   uint8_t crc = 0x00;
   const uint8_t poly = 0x1D;
   uint8_t xor_out = 0x00;
+  int block = gwm_block(msg);
   int len = 8;
   for (int i = 1; i < len; i++) {
-    uint8_t byte = msg->data[i];
+    uint8_t byte = msg->data[block + i];
     crc ^= byte;
     for (int bit = 0; bit < 8; bit++) {
       if ((crc & 0x80U) != 0U) {
@@ -104,6 +136,12 @@ static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
     xor_out = 0x2DU;
   } else if (msg->addr == GWM_SPEED) {
     xor_out = 0x7FU;
+  } else if (msg->addr == GWM_GAS) {
+    xor_out = 0x95U;
+  } else if (msg->addr == GWM_BRAKE) {
+    xor_out = 0xEEU;
+  } else if (msg->addr == GWM_RX_STEER_RELATED) {
+    xor_out = 0x61U;
   } else {
   }
   chksum = crc ^ xor_out;
@@ -116,6 +154,15 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
     gwm_set_speed = msg->data[22];
     gwm_acc_state = ((uint32_t)msg->data[18] >> 3) & 0x7U;
     gwm_acc_seen = true;
+    // the ACC off for 5 frames with openpilot engaged ends it, as the car port does. Not with always-on lateral: it steers
+    // without the ACC by design, and its longitudinal pauses on the brake
+    bool acc_off = gwm_acc_state == GWM_ACC_OFF;
+    gwm_acc_off_frames = (acc_main_on && acc_off && !gwm_always_on_lateral) ? (gwm_acc_off_frames + 1U) : 0U;
+    if (gwm_acc_off_frames >= GWM_ACC_OFF_FRAMES) {
+      acc_main_on = false;
+      gwm_long_allowed = false;
+      gwm_acc_off_frames = 0U;
+    }
   }
 
   if (msg->bus == GWM_MAIN_BUS) {
@@ -129,7 +176,7 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
       uint32_t fr = ((msg->data[3] << 8) | msg->data[4]) & 0x1FFFU;
       uint32_t rl = ((msg->data[41] << 8) | msg->data[42]) & 0x1FFFU;
       uint32_t rr = ((msg->data[43] << 8) | msg->data[44]) & 0x1FFFU;
-      float speed = (float)((fr + rr + rl + fl) / 4.0f * 0.05924739 * KPH_TO_MS);
+      float speed = (float)((fr + rr + rl + fl) / 4.0f * 0.05924739f * KPH_TO_MS);
       vehicle_moving = speed > 0.0f;
       UPDATE_VEHICLE_SPEED(speed);
       if (vehicle_moving) {
@@ -144,6 +191,7 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
         gwm_handoff = true;
         gwm_handoff_brake = gwm_brake_last;
         gwm_handoff_ts = microsecond_timer_get();
+        gwm_handoff_mode = gwm_mode_last;
       }
       if (!pressed) {
         gwm_handoff = false;
@@ -179,6 +227,8 @@ static void gwm_rx_hook(const CANPacket_t *msg) {
         gwm_long_allowed = true;
         // every pull is a new engage: openpilot may have dropped out with no cancel or brake to clear acc_main_on
         cruise_engaged_prev = false;
+        // and gives the ACC its time again
+        gwm_acc_off_frames = 0U;
       }
       // exit controls once cancel is pressed
       bool cancel_button = GET_BIT(msg, 46U);
@@ -227,8 +277,19 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
       gas_raw = gas_raw - 192;
       violation |= longitudinal_gas_checks(gas_raw, GWM_LONG_LIMITS);
 
+      uint32_t mode = msg->data[9] & 0x1FU;
+      bool inactive_mode = (mode == GWM_MODE_START) || (mode == GWM_MODE_ACC_OFF) || (mode == GWM_MODE_STANDBY) ||
+                           (mode == GWM_MODE_GAS_OVERRIDE);
+      bool brake_mode = (mode == GWM_MODE_BRAKE) || (mode == GWM_MODE_HOLD);
+      // gas only in the gas mode, brake only in the brake and hold modes: never both
+      violation |= (gas_raw != GWM_LONG_LIMITS.inactive_gas) && (mode != GWM_MODE_GAS);
+      violation |= (brake_raw != 0) && !brake_mode;
+
       gwm_handoff = gwm_handoff && !gas_pressed && (safety_get_ts_elapsed(microsecond_timer_get(), gwm_handoff_ts) < GWM_BRAKE_HANDOFF_US);
-      bool handoff = gwm_handoff && (gas_raw == GWM_LONG_LIMITS.inactive_gas) && (brake_raw >= 0) && (brake_raw <= gwm_handoff_brake);
+      // the handoff keeps a brake that only comes down, in the brake mode, or in the hold if it was holding
+      bool handoff_mode = (mode == GWM_MODE_BRAKE) || inactive_mode || ((mode == GWM_MODE_HOLD) && (gwm_handoff_mode == GWM_MODE_HOLD));
+      bool handoff = gwm_handoff && handoff_mode && (gas_raw == GWM_LONG_LIMITS.inactive_gas) && (brake_raw >= 0) &&
+                     (brake_raw <= gwm_handoff_brake);
       if (handoff) {
         gwm_handoff_brake = brake_raw;
       } else {
@@ -237,8 +298,16 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
         // longitudinal paused by the brake in always-on lateral: only inactive commands
         bool long_paused = gwm_always_on_lateral && !gwm_long_allowed;
         violation |= long_paused && ((brake_raw != 0) || (gas_raw != GWM_LONG_LIMITS.inactive_gas));
+
+        // without openpilot in control, only the modes that don't actuate: a hold with a zero brake still brakes. The one
+        // exception is the camera's own hold of a stopped car, which goes on as it does today: let go of, a car stopped on a
+        // climb would roll back. Never moving and never with the gas pedal
+        bool long_on = get_longitudinal_allowed() && !long_paused;
+        bool stopped_hold = (mode == GWM_MODE_HOLD) && !vehicle_moving && !gas_pressed;
+        violation |= !inactive_mode && !stopped_hold && !(long_on && ((mode == GWM_MODE_GAS) || brake_mode));
       }
       gwm_brake_last = violation ? 0 : brake_raw;
+      gwm_mode_last = violation ? GWM_MODE_STANDBY : mode;
     }
   }
 
@@ -316,9 +385,9 @@ static safety_config gwm_init(uint16_t param) {
   static const RxCheck gwm_rx_checks[] = {
     {.msg = {{GWM_ADAS_ACTIVATION, GWM_MAIN_BUS, 8, 100U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // cruise state, steering angle, steer rate
     {.msg = {{GWM_SPEED, GWM_MAIN_BUS, 64, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // speed
-    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal
-    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
-    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera
+    {.msg = {{GWM_GAS, GWM_MAIN_BUS, 64, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   // gas pedal
+    {.msg = {{GWM_BRAKE, GWM_MAIN_BUS, 64, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // brake2
+    {.msg = {{GWM_RX_STEER_RELATED, GWM_MAIN_BUS, 64, 50U, .max_counter = 14U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // eps feedback to camera
     {.msg = {{GWM_STEER_CMD, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // copy stock steering cmd
     {.msg = {{GWM_CRUISE, GWM_CAMERA_BUS, 64, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // CRUISE_STATE, ACC
     {.msg = {{GWM_LONG_CONTROL, GWM_CAMERA_BUS, 64, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, // Longitudinal control message from camera
@@ -340,6 +409,9 @@ static safety_config gwm_init(uint16_t param) {
   gwm_handoff = false;
   gwm_handoff_brake = 0;
   gwm_handoff_ts = 0U;
+  gwm_mode_last = GWM_MODE_START;
+  gwm_handoff_mode = GWM_MODE_START;
+  gwm_acc_off_frames = 0U;
   gwm_stalk_button = false;
   gwm_resume_frames = 0U;
   gwm_minus_frames = 0U;

@@ -11,10 +11,15 @@ STEER_MAX_COUNTER = 14  # the camera's 0x12B too: 15 was ours, on 1 of every 15 
 ACC_GAS_ACCEL = [-0.14, -0.1, -0.05, 0., 0.1, 0.2, 0.35, 0.5, 0.75, 1., 1.25, 1.5, 1.75, 2.]  # m/s^2
 ACC_GAS = [-192, -100, -25, 60, 215, 330, 545, 725, 1105, 1440, 1900, 2215, 2555, 3000]
 
-# BRAKE_OR_GAS_REQ
+# BRAKE_OR_GAS_REQ, as the camera sends it. The panda lets out only the ones that don't actuate while openpilot isn't in control
+MODE_START = 0  # a frame at start
+MODE_ACC_OFF = 4
+MODE_STANDBY = 8
 MODE_GAS = 12
 MODE_BRAKE = 13
+MODE_GAS_OVERRIDE = 20  # the driver on the gas with the ACC on
 MODE_HOLD = 25  # the end of a stop and the stop itself, on the friction brake
+INACTIVE_MODES = (MODE_START, MODE_ACC_OFF, MODE_STANDBY, MODE_GAS_OVERRIDE)
 
 
 class CanBus(CanBusBase):
@@ -71,7 +76,8 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
   return 0x12B, dat, CAN.main
 
 
-def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False, hold=False):
+def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False, hold=False,
+                                gas_pedal=False, stopped=False):
   values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
             ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
   brake_cmd = accel_cmd = 0
@@ -84,9 +90,16 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, acc
   elif active:
     values.update(BRAKE_OR_GAS_REQ=MODE_GAS, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
     accel_cmd = np.interp(accel, ACC_GAS_ACCEL, ACC_GAS)
-  elif pedal and values["BRAKE_OR_GAS_REQ"] in (12, 13):
+  elif stopped and not gas_pedal and values["BRAKE_OR_GAS_REQ"] == MODE_HOLD:
+    # the camera's own hold of a stopped car stays, as the canal always did: let go of, a car stopped on a climb would roll back
+    pass
+  elif pedal and values["BRAKE_OR_GAS_REQ"] not in INACTIVE_MODES:
     # the camera is a moment behind the pedal: never a frame of gas between our brake and the driver's
-    values.update(BRAKE_OR_GAS_REQ=4, STANDSTILL_1=0, STANDSTILL_2=3, STANDSTILL_3=0)
+    values.update(BRAKE_OR_GAS_REQ=MODE_ACC_OFF, STANDSTILL_1=0, STANDSTILL_2=3, STANDSTILL_3=0)
+  elif values["BRAKE_OR_GAS_REQ"] not in INACTIVE_MODES:
+    # openpilot not in control: the camera's gas, brake or hold never goes out (it sends them for a few frames around
+    # each engage). What the camera sends with the driver on the gas, or standing by
+    values.update(BRAKE_OR_GAS_REQ=MODE_GAS_OVERRIDE if gas_pedal else MODE_STANDBY)
   values.update(BRAKE_CMD=brake_cmd, GAS_CMD=accel_cmd)
   dat = _update_fields(packer, "ACC_CMD", longitudinal_stock_data, values)
   dat = _update_fields(packer, "ACC_CMD", dat, {

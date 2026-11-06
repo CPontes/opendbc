@@ -169,6 +169,42 @@ class TestEngagement:
     assert car.lever().cruiseState.enabled
 
 
+class TestAccOff:
+  """The ACC off (CRUISE_STATE_2 = 1) for 5 of its frames ends the engagement, as in the panda: it dropped out, or never took
+  the pull. The test car sends the ACC every frame."""
+  safety_param = 0
+
+  def test_five_frames_end_it(self):
+    car = Car(self.safety_param)
+    car.step(ACC={"CRUISE_STATE_2": 3})
+    assert car.lever().cruiseState.enabled
+    assert car.step(frames=4, ACC={"CRUISE_STATE_2": 1}).cruiseState.enabled
+    assert not car.step().cruiseState.enabled
+    assert not car.step(frames=10, ACC={"CRUISE_STATE_2": 3}).cruiseState.enabled
+    assert car.lever().cruiseState.enabled
+
+  def test_off_before_the_pull_does_not_count(self):
+    car = Car(self.safety_param)
+    car.step(frames=20, ACC={"CRUISE_STATE_2": 1})
+    car.pull()
+    assert car.release().cruiseState.enabled  # 2 frames, counted from the pull
+    assert car.step(frames=2).cruiseState.enabled
+    assert not car.step().cruiseState.enabled
+
+  @pytest.mark.parametrize("state", [0, 2, 3, 5])
+  def test_other_states_keep_it(self, state):
+    car = Car(self.safety_param)
+    car.lever()
+    assert car.step(frames=200, ACC={"CRUISE_STATE_2": state}).cruiseState.enabled
+
+
+class TestAccOffAlwaysOn:
+  def test_always_on_lateral_steers_without_the_acc(self):
+    car = Car(GwmSafetyFlags.ALWAYS_ON_LATERAL.value)
+    car.lever()
+    assert car.step(frames=200, ACC={"CRUISE_STATE_2": 1}).cruiseState.enabled
+
+
 class TestBrake:
   def test_brake_during_the_pull_is_not_an_engage(self):
     # the foot leaving the brake while the lever is pulled: 2 of 114 pulls in the logs, panda refused both
