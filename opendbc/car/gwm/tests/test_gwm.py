@@ -725,6 +725,30 @@ class TestGwmLongitudinal:
     self.CS.out.vEgo = 0.
     self.CS.out.standstill = True
 
+  def test_our_hold_never_carries_the_cameras_drive_off(self):
+    # LONG-05: the camera sets the top bits of byte 9 to 2 as it leaves a stop. Passed on with our hold, the car let the brake
+    # go with the car stopped and it rolled back on a climb (route 41, 37.5 min)
+    stopping = structs.CarControl.Actuators.LongControlState.stopping
+    self.stopped()
+    self.stock(12 | 0x40)
+    for _ in range(50):
+      frame = self.frame(-0.75, state=stopping)
+    assert frame[9] & 0x1F == 25 and frame[9] >> 5 == 0
+    assert frame[8] == gwmcan.checksum(frame[9:16], 0xEF)  # the brake block's CRC is made after the bits are cleared
+
+  def test_our_brake_never_carries_it_either(self):
+    self.CS.out.vEgo = 5.
+    self.stock(12 | 0x40)
+    frame = self.frame(-1.5)
+    assert frame[9] & 0x1F == 13 and frame[9] >> 5 == 0
+
+  def test_our_gas_keeps_the_cameras_bits(self):
+    # leaving a stop is the camera's own request too: on the gas it goes as the camera sends it
+    self.CS.out.vEgo = 2.
+    self.stock(12 | 0x40)
+    frame = self.frame(0.5)
+    assert frame[9] & 0x1F == 12 and frame[9] >> 5 == 2
+
   def test_a_stop_back_before_the_car_moves_keeps_the_hold(self):
     # behind a car creeping on, the planner goes to the gas for a frame and back to stopping (route 40, 2.8 min): the hold
     # comes back where it was, not from nothing, or the pressure falls with the car still stopped. Out of a gas frame the
