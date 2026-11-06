@@ -58,6 +58,9 @@ class CarState(CarStateBase):
 
     ret.accFaulted = bool(cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 0)
     self.acc_driving = cp_cam.vl["ACC"]["CRUISE_STATE_2"] == 3
+    # LizPilot reads these (test channel only, never sent to comma): what the Haval's ACC does and measures. Read only
+    ret.cruiseState.driving = self.acc_driving
+    ret.camLeadDistance = cp_cam.vl["UNDEFINED_INTERESTING_SIGNALS"]["LEAD_DISTANCE"]
     ret.cruiseState.speed = cp_cam.vl["ACC"]["ACC_SPEED_SELECTION"]  * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = ret.cruiseState.speed
     if not self.CP.openpilotLongitudinalControl:
@@ -131,5 +134,6 @@ class CarState(CarStateBase):
     return {
       Bus.main: CANParser(DBC[CP.carFingerprint][Bus.pt], [("STEER_AND_AP_STALK", 0), ("RX_STEER_RELATED", 0)], main_bus),
       Bus.adas: CANParser(DBC[CP.carFingerprint][Bus.pt], [], adas_bus),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [("STEER_CMD", 0), ("ACC_CMD", 0), ("LATERAL_STATE", 0)], cam_bus),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [("STEER_CMD", 0), ("ACC_CMD", 0), ("LATERAL_STATE", 0),
+                                                           ("UNDEFINED_INTERESTING_SIGNALS", float("nan"))], cam_bus),
     }

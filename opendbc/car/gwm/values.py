@@ -21,8 +21,16 @@ class CarControllerParams:
     self.STEER_ERROR_MAX = 80
 
 
+class GwmFlags(IntFlag):
+  SOFT_HANDOFF = 1  # LizPilot's name for it (test channel): nothing here reads it
+
+
 class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
+  # LizPilot's names for its own features (test channel): this panda ignores them, and LizPilot keeps them off
+  ALWAYS_ON_LATERAL = 2
+  AUTO_RESUME = 4
+  ACC_MINUS = 8
 
 
 @dataclass
