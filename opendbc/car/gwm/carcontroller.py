@@ -258,12 +258,14 @@ class CarController(CarControllerBase):
             # the panda takes its level at the pedal and refuses more: the hold stops climbing until openpilot lets go
             hold = self.brake_accel_last
           else:
-            start = self.brake_accel_last if self.hold_kept is None else min(self.brake_accel_last, self.hold_kept)
+            # only for wheels stopped or going back: a car already leaving gets no jab of hold from a frame of stopping
+            kept = self.hold_kept is not None and (CS.out.standstill or CS.rolling_back)
+            start = min(self.brake_accel_last, self.hold_kept) if kept else self.brake_accel_last
             hold = max(start - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
           self.accel = min(self.accel, hold)
           self.hold_kept = self.accel if self.hold_kept is None else min(self.hold_kept, self.accel)
         elif not CC.longActive or CS.out.vEgo >= HOLD_SPEED:
-          # out of D openpilot is never in control, so that ends it too
+          # out of D openpilot lets go a moment later (wrongGear), and that ends it too; until then the hold carries on, as before
           self.hold_kept = None
         self.brake_accel_last = min(self.accel, 0.)
         if self.braking:

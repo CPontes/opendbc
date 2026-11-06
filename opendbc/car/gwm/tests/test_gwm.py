@@ -721,18 +721,44 @@ class TestGwmLongitudinal:
     assert self.send(-0.05)[:2] == (25, 81)
     assert self.stop(v_ego=0.)[:2] == (25, 81)
 
+  def stopped(self):
+    self.CS.out.vEgo = 0.
+    self.CS.out.standstill = True
+
   def test_a_stop_back_before_the_car_moves_keeps_the_hold(self):
     # behind a car creeping on, the planner goes to the gas for a frame and back to stopping (route 40, 2.8 min): the hold
-    # comes back where it was, not from nothing, or the pressure falls with the car still stopped
+    # comes back where it was, not from nothing, or the pressure falls with the car still stopped. Out of a gas frame the
+    # stopping request starts near zero, as it did there
     self.stop(frames=200)
-    self.CS.out.vEgo = 0.
+    self.stopped()
     for _ in range(3):
       assert self.send(0.1)[0] == 12
-      assert self.stop(v_ego=0.)[:2] == (25, 81)
+      assert self.stop(-0.01, v_ego=0.)[:2] == (25, 81)
+
+  def test_a_frame_of_stopping_in_a_departure_is_no_jab_of_hold(self):
+    # the other flicker: the car already leaving, one frame of stopping must not bring the whole hold back on a moving car
+    self.stop(frames=200)
+    self.stopped()
+    self.send(0.5)
+    self.CS.out.standstill = False
+    for v in (0.02, 0.05, 0.08, 0.11, 0.14, 0.16):
+      self.CS.out.vEgo = v
+      assert self.send(0.5)[0] == 12
+    assert self.stop(-0.01, v_ego=0.17)[1] < 50
+    self.CS.out.vEgo = 0.18
+    assert self.send(0.5)[0] == 12
+
+  def test_with_the_pedal_the_kept_hold_does_not_come_back(self):
+    # the panda takes its level at the pedal and refuses more: the hold stays at the last frame, not at the kept one
+    self.stop(frames=200)
+    self.stopped()
+    self.send(0.1)
+    self.pedal()
+    assert self.stop(-0.01, v_ego=0.)[1] < 50
 
   def test_a_harder_stop_comes_back_at_the_stock_hold(self):
     self.stop(-3., frames=50)
-    self.CS.out.vEgo = 0.
+    self.stopped()
     self.send(0.1)
     assert self.stop(-0.3, v_ego=0.)[:2] == (25, 81)  # -2.12, what held 860 of pressure on the climb
 
