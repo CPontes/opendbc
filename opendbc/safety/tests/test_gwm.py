@@ -911,7 +911,10 @@ class TestGwmAccMode(GwmStalkTest):
     self._engage()
     self._gas(10)
     for mode in range(32):
-      self.assertEqual(mode in INACTIVE_MODES, self._acc(mode), mode)  # stopped too: the gas pedal ends the hold
+      self.assertEqual(mode in INACTIVE_MODES or mode == 25, self._acc(mode), mode)  # stopped: the camera's hold stays
+    self._speed(5)
+    for mode in range(32):
+      self.assertEqual(mode in INACTIVE_MODES, self._acc(mode), mode)
 
   def test_gas_only_in_the_gas_mode_brake_only_in_brake_and_hold(self):
     self._engage()
@@ -935,11 +938,18 @@ class TestGwmAccMode(GwmStalkTest):
     self._speed(0)
     self.assertTrue(self._acc(25))
     self.assertFalse(self._acc(25, brake=41))  # with no brake of ours
-    self._gas(10)
-    self.assertFalse(self._acc(25))  # nor with the gas pedal
-    self._gas(0)
     self._speed(0.5)
     self.assertFalse(self._acc(25))  # nor moving
+
+  def test_the_hold_of_a_stopped_car_stays_with_the_gas_pedal(self):
+    # leaving a stop on the gas: the camera lets go of its hold 0.04 to 0.61 s after the pedal, as the stock car does
+    self._engage()
+    self._gas(10)
+    self.assertTrue(self._acc(25))
+    self.assertFalse(self._acc(25, brake=41))
+    self._speed(0.5)
+    self.assertFalse(self._acc(25))  # moving, the hold is refused even with the pedal
+    self.assertTrue(self._acc(20))
 
   def test_the_frame_of_the_car_port_passes_whatever_the_camera_does(self):
     # disengaged: the camera's gas, brake or hold goes out as standby, its other modes as they are
@@ -953,7 +963,7 @@ class TestGwmAccMode(GwmStalkTest):
           stock = self.packer.make_can_msg("ACC_CMD", 2, {"BRAKE_OR_GAS_REQ": mode, "BRAKE_CMD": -60, "GAS_CMD": 500})[1]
           addr, dat, bus = gwmcan.create_longitudinal_command(self.packer, SimpleNamespace(main=0), stock, 0., False, False, False,
                                                                pedal=pedal, gas_pedal=gas_pedal, stopped=stopped)
-          kept = mode in INACTIVE_MODES or (mode == 25 and stopped and not gas_pedal)
+          kept = mode in INACTIVE_MODES or (mode == 25 and stopped)
           self.assertEqual(dat[9] & 0x1F, mode if kept else expected, (mode, stopped, pedal, gas_pedal))
           self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)), (mode, stopped, pedal, gas_pedal))
         self._gas(0)

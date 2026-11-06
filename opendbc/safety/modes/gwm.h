@@ -301,9 +301,10 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
 
         // without openpilot in control, only the modes that don't actuate: a hold with a zero brake still brakes. The one
         // exception is the camera's own hold of a stopped car, which goes on as it does today: let go of, a car stopped on a
-        // climb would roll back. Never moving and never with the gas pedal
+        // climb would roll back. With the gas pedal too: the camera lets go of it by itself 0.04 to 0.61 s after the pedal
+        // (107 starts from a stop, segurar_com_gas.py). Never moving, and never with a brake of ours
         bool long_on = get_longitudinal_allowed() && !long_paused;
-        bool stopped_hold = (mode == GWM_MODE_HOLD) && !vehicle_moving && !gas_pressed;
+        bool stopped_hold = (mode == GWM_MODE_HOLD) && !vehicle_moving;
         violation |= !inactive_mode && !stopped_hold && !(long_on && ((mode == GWM_MODE_GAS) || brake_mode));
       }
       gwm_brake_last = violation ? 0 : brake_raw;

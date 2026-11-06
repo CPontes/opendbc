@@ -90,8 +90,9 @@ def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, acc
   elif active:
     values.update(BRAKE_OR_GAS_REQ=MODE_GAS, STANDSTILL_1=0, STANDSTILL_2=4, STANDSTILL_3=1)
     accel_cmd = np.interp(accel, ACC_GAS_ACCEL, ACC_GAS)
-  elif stopped and not gas_pedal and values["BRAKE_OR_GAS_REQ"] == MODE_HOLD:
-    # the camera's own hold of a stopped car stays, as the canal always did: let go of, a car stopped on a climb would roll back
+  elif stopped and values["BRAKE_OR_GAS_REQ"] == MODE_HOLD:
+    # the camera's own hold of a stopped car stays, as the canal always did: let go of, a car stopped on a climb would roll back.
+    # With the gas pedal too: the camera lets go of it by itself a moment after the pedal (0.04 to 0.61 s in 107 starts)
     pass
   elif pedal and values["BRAKE_OR_GAS_REQ"] not in INACTIVE_MODES:
     # the camera is a moment behind the pedal: never a frame of gas between our brake and the driver's
