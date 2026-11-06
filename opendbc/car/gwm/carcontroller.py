@@ -61,6 +61,9 @@ HOLD_RAMP_RATE = 0.6  # m/s^3
 # (0.74 s from the hold mode to the stop): let go at once, a gas that didn't hold the climb would roll it back again
 ROLLBACK_MAX_SPEED = 1.  # m/s
 ROLLBACK_HOLD_TIME = 1.  # s
+# A stop that comes back before the car moves keeps the hold it had. Behind a car creeping at 1 to 2 km/h the planner went to the
+# gas for a frame and back to stopping, and the hold started again from nothing: in the hold mode the pressure follows what is
+# asked, and it fell from 860 to 0 in 0.3 s with the car still stopped, which then rolled back 13 cm on a climb (route 40, 2.8 min)
 
 
 class CarController(CarControllerBase):
@@ -80,6 +83,7 @@ class CarController(CarControllerBase):
     self.handoff_accel = 0.
     self.handoff_hold = False
     self.holding = False
+    self.hold_kept: float | None = None  # the hold this stop reached, until the car moves on
     self.rollback_left = 0.  # s
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
@@ -254,8 +258,13 @@ class CarController(CarControllerBase):
             # the panda takes its level at the pedal and refuses more: the hold stops climbing until openpilot lets go
             hold = self.brake_accel_last
           else:
-            hold = max(self.brake_accel_last - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
+            start = self.brake_accel_last if self.hold_kept is None else min(self.brake_accel_last, self.hold_kept)
+            hold = max(start - HOLD_RAMP_RATE * DT_CTRL * self.params.STEER_STEP, HOLD_ACCEL)
           self.accel = min(self.accel, hold)
+          self.hold_kept = self.accel if self.hold_kept is None else min(self.hold_kept, self.accel)
+        elif not CC.longActive or CS.out.vEgo >= HOLD_SPEED:
+          # out of D openpilot is never in control, so that ends it too
+          self.hold_kept = None
         self.brake_accel_last = min(self.accel, 0.)
         if self.braking:
           self.gas_ramp = gwmcan.ACC_GAS_ACCEL[0]

@@ -721,6 +721,32 @@ class TestGwmLongitudinal:
     assert self.send(-0.05)[:2] == (25, 81)
     assert self.stop(v_ego=0.)[:2] == (25, 81)
 
+  def test_a_stop_back_before_the_car_moves_keeps_the_hold(self):
+    # behind a car creeping on, the planner goes to the gas for a frame and back to stopping (route 40, 2.8 min): the hold
+    # comes back where it was, not from nothing, or the pressure falls with the car still stopped
+    self.stop(frames=200)
+    self.CS.out.vEgo = 0.
+    for _ in range(3):
+      assert self.send(0.1)[0] == 12
+      assert self.stop(v_ego=0.)[:2] == (25, 81)
+
+  def test_a_harder_stop_comes_back_at_the_stock_hold(self):
+    self.stop(-3., frames=50)
+    self.CS.out.vEgo = 0.
+    self.send(0.1)
+    assert self.stop(-0.3, v_ego=0.)[:2] == (25, 81)  # -2.12, what held 860 of pressure on the climb
+
+  def test_the_kept_hold_ends_when_the_car_moves_on(self):
+    self.stop(frames=200)
+    self.CS.out.vEgo = 1.
+    self.send(0.3)
+    assert self.stop()[:2] == (25, 55)  # a new stop builds up again from what is asked
+
+  def test_the_kept_hold_ends_with_openpilot(self):
+    self.stop(frames=200)
+    self.stop(active=False)
+    assert self.stop()[:2] == (25, 55)
+
   def test_the_hold_does_not_follow_a_car_moving_on(self):
     self.stop(frames=200)
     self.CS.out.vEgo = 1.
