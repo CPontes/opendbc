@@ -31,7 +31,8 @@ class GwmSafetyFlags(IntFlag):
   LONG_CONTROL = 1
   ALWAYS_ON_LATERAL = 2  # brake pauses longitudinal only, steering stays engaged until cancel
   AUTO_RESUME = 4  # openpilot may pull the stalk once per stop
-  ACC_MINUS = 8  # openpilot may press the minus button of the ACC, never the plus
+  ACC_MINUS = 8  # openpilot may press the minus button of the ACC
+  ACC_PLUS = 16  # and the plus, to the road's limit: with the ACC driving, below the panda's ceiling (CRUISE-01)
 
 
 @dataclass

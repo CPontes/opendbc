@@ -21,6 +21,10 @@
 #define GWM_RESUME_MAX_FRAMES    20U  // per stop. A real pull is 10 to 16 frames
 #define GWM_MINUS_MAX_FRAMES     78U  // 6 presses, 30 km/h down. It can't take the car off a road by itself
 #define GWM_MINUS_QUIET_US   60000000U  // the budget comes back only after this long with none: any minute holds 6 presses at most
+#define GWM_PLUS_MAX_FRAMES     104U  // 8 presses, 40 km/h up. Only to the road's limit, and never past GWM_PLUS_MAX_KPH
+#define GWM_PLUS_QUIET_US    60000000U  // as the minus: any minute holds 8 presses at most
+#define GWM_PLUS_MAX_KPH         110U  // the ACC's set speed: at or above this, no plus from openpilot (Brazil's highest limit)
+#define GWM_ACC_DRIVING            3U  // CRUISE_STATE_2 with the ACC in control
 
 #define GWM_BRAKE_ZERO              41  // the brake field with no braking in it
 #define GWM_BRAKE_HANDOFF_US    200000U  // a pedal takes about this to build pressure, and the stock ACC brakes on for 0.1 s
@@ -43,10 +47,18 @@ static bool gwm_auto_resume = false;
 static bool gwm_stalk_button = false;
 static uint32_t gwm_resume_frames = 0U;
 
-// the minus button of the ACC: never the plus, and a budget of its own
+// the minus button of the ACC, with a budget of its own
 static bool gwm_acc_minus = false;
 static uint32_t gwm_minus_frames = 0U;
 static uint32_t gwm_minus_last_ts = 0U;
+
+// the plus button of the ACC, to the road's limit (CRUISE-01): a budget of its own, only with the ACC driving below a ceiling
+static bool gwm_acc_plus = false;
+static uint32_t gwm_plus_frames = 0U;
+static uint32_t gwm_plus_last_ts = 0U;
+static bool gwm_acc_seen = false;  // a 0x2AB from the camera since the session began
+static uint32_t gwm_set_speed = 0U;  // the ACC's set speed, km/h (ACC_SPEED_SELECTION)
+static uint32_t gwm_acc_state = 0U;  // CRUISE_STATE_2
 
 // our stalk frame goes to the camera alone: the original stays out right after each one
 static bool gwm_stalk_tx_seen = false;
@@ -99,6 +111,13 @@ static uint32_t gwm_compute_checksum(const CANPacket_t *msg) {
 }
 
 static void gwm_rx_hook(const CANPacket_t *msg) {
+  // the ACC's own state and set speed, as the camera sends them: the plus needs both
+  if ((msg->bus == GWM_CAMERA_BUS) && (msg->addr == GWM_CRUISE)) {
+    gwm_set_speed = msg->data[22];
+    gwm_acc_state = ((uint32_t)msg->data[18] >> 3) & 0x7U;
+    gwm_acc_seen = true;
+  }
+
   if (msg->bus == GWM_MAIN_BUS) {
     // GAS_POSITION
     if (msg->addr == GWM_GAS) {
@@ -223,7 +242,7 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // the stalk only goes out to cancel or to resume from a stop: no speed or distance button
+  // the stalk only goes out to cancel, to resume from a stop, or for one step of the set speed: no distance button
   if (msg->addr == GWM_ADAS_ACTIVATION) {
     bool other_button = (msg->data[6] & 0x0CU) != 0U;
     bool cancel = ((msg->data[5] & 0xF0U) == 0x40U) && !other_button;
@@ -237,7 +256,14 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
     }
     bool minus_allowed = minus && gwm_acc_minus && controls_allowed && gwm_long_allowed && vehicle_moving && driver_clear &&
                          (gwm_minus_frames < GWM_MINUS_MAX_FRAMES);
-    violation |= !cancel && !resume_allowed && !minus_allowed;
+    bool plus = ((msg->data[5] & 0xF0U) == 0U) && ((msg->data[6] & 0x0CU) == 0x08U);
+    if (plus && (safety_get_ts_elapsed(microsecond_timer_get(), gwm_plus_last_ts) >= GWM_PLUS_QUIET_US)) {
+      gwm_plus_frames = 0U;
+    }
+    bool acc_below_ceiling = gwm_acc_seen && (gwm_acc_state == GWM_ACC_DRIVING) && (gwm_set_speed < GWM_PLUS_MAX_KPH);
+    bool plus_allowed = plus && gwm_acc_plus && controls_allowed && gwm_long_allowed && vehicle_moving && driver_clear &&
+                        acc_below_ceiling && (gwm_plus_frames < GWM_PLUS_MAX_FRAMES);
+    violation |= !cancel && !resume_allowed && !minus_allowed && !plus_allowed;
     if (resume_allowed) {
       gwm_resume_frames += 1U;
     }
@@ -245,7 +271,11 @@ static bool gwm_tx_hook(const CANPacket_t *msg) {
       gwm_minus_frames += 1U;
       gwm_minus_last_ts = microsecond_timer_get();
     }
-    if (cancel || resume_allowed || minus_allowed) {
+    if (plus_allowed) {
+      gwm_plus_frames += 1U;
+      gwm_plus_last_ts = microsecond_timer_get();
+    }
+    if (cancel || resume_allowed || minus_allowed || plus_allowed) {
       gwm_stalk_tx_seen = true;
       gwm_stalk_tx_ts = microsecond_timer_get();
     }
@@ -299,9 +329,11 @@ static safety_config gwm_init(uint16_t param) {
   const uint32_t FLAG_GWM_ALWAYS_ON_LATERAL = 2U;
   const uint32_t FLAG_GWM_AUTO_RESUME = 4U;
   const uint32_t FLAG_GWM_ACC_MINUS = 8U;
+  const uint32_t FLAG_GWM_ACC_PLUS = 16U;
   gwm_always_on_lateral = GET_FLAG(param, FLAG_GWM_ALWAYS_ON_LATERAL);
   gwm_auto_resume = GET_FLAG(param, FLAG_GWM_AUTO_RESUME);
   gwm_acc_minus = GET_FLAG(param, FLAG_GWM_ACC_MINUS);
+  gwm_acc_plus = GET_FLAG(param, FLAG_GWM_ACC_PLUS);
   gwm_long_allowed = false;
   gwm_brake_pressed_prev = false;
   gwm_brake_last = 0;
@@ -312,6 +344,11 @@ static safety_config gwm_init(uint16_t param) {
   gwm_resume_frames = 0U;
   gwm_minus_frames = 0U;
   gwm_minus_last_ts = 0U;
+  gwm_plus_frames = 0U;
+  gwm_plus_last_ts = 0U;
+  gwm_acc_seen = false;
+  gwm_set_speed = 0U;
+  gwm_acc_state = 0U;
   gwm_stalk_tx_seen = false;
   gwm_stalk_tx_ts = 0U;
 

@@ -89,6 +89,9 @@ class CarController(CarControllerBase):
     self.cancel_wait = 0
     self.minus_frames = 0
     self.minus_gap = 0
+    self.plus_frames = 0
+    self.plus_gap = 0
+    self.stalk_quiet = MINUS_GAP  # frames since our last stalk frame: a press of one button never right after the other's
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -131,18 +134,39 @@ class CarController(CarControllerBase):
       can_sends.append(gwmcan.create_resume_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
 
     # One press at a time, only with the ACC driving a moving car and nobody on the stalk. Who asks reads the set speed back.
+    self.stalk_quiet = 0 if any(addr == 0xA1 for addr, _, _ in can_sends) else self.stalk_quiet + 1
     minus = CC.cruiseControl.decrease and not CC.cruiseControl.cancel and CS.acc_driving and not CS.out.standstill and CS.stalk_idle
     if not minus or CS.steer_and_ap_stalk_msg is None:
       self.minus_frames = 0
       self.minus_gap = 0
     elif self.minus_gap > 0:
       self.minus_gap -= 1
+    elif self.minus_frames == 0 and self.stalk_quiet <= MINUS_GAP:
+      pass  # a frame of ours on the stalk just went out: a new press waits the gap
     else:
       self.minus_frames += 1
       can_sends.append(gwmcan.create_minus_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
       if self.minus_frames >= MINUS_FRAMES:
         self.minus_frames = 0
         self.minus_gap = MINUS_GAP
+
+    # The plus, to the road's limit, the same way. Never with a minus asked: the minus wins
+    self.stalk_quiet = 0 if any(addr == 0xA1 for addr, _, _ in can_sends) else self.stalk_quiet
+    plus = CC.cruiseControl.increase and not CC.cruiseControl.decrease and not CC.cruiseControl.cancel and CS.acc_driving and \
+           not CS.out.standstill and CS.stalk_idle
+    if not plus or CS.steer_and_ap_stalk_msg is None:
+      self.plus_frames = 0
+      self.plus_gap = 0
+    elif self.plus_gap > 0:
+      self.plus_gap -= 1
+    elif self.plus_frames == 0 and self.stalk_quiet <= MINUS_GAP:
+      pass
+    else:
+      self.plus_frames += 1
+      can_sends.append(gwmcan.create_plus_command(self.packer, self.CAN, CS.steer_and_ap_stalk_msg))
+      if self.plus_frames >= MINUS_FRAMES:
+        self.plus_frames = 0
+        self.plus_gap = MINUS_GAP
 
     if self.frame % 2 == 0: # 50 Hz
       # Track the actual transmitted request; no original means no replacement request.

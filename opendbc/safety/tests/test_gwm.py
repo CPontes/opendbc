@@ -482,6 +482,121 @@ class TestGwmAccMinus(GwmStalkTest):
     self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
 
 
+class TestGwmAccPlus(GwmStalkTest):
+  """The plus of the ACC, to the road's limit (CRUISE-01): the panda checks the ACC's own state and set speed."""
+  SAFETY_PARAM = GwmSafetyFlags.ACC_PLUS.value
+
+  def _plus(self, **values):
+    return self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {"AP_INCREASE_SPEED_COMMAND": 1, **values}, fix_checksum=checksum))
+
+  def _acc(self, state=3, kph=60):
+    return self._rx(self.packer.make_can_msg_safety("ACC", 2, {"CRUISE_STATE_2": state, "ACC_SPEED_SELECTION": kph}))
+
+  def _driving(self, kph=60):
+    self._engage()
+    self._speed(15)
+    self._acc(3, kph)
+    self.safety.set_timer(100000000)
+
+  def test_passes_with_the_acc_driving_below_the_ceiling(self):
+    self._driving(60)
+    self.assertTrue(self._plus())
+    self._acc(3, 105)
+    self.assertTrue(self._plus())
+
+  def test_frame_of_the_car_port_passes(self):
+    self._driving()
+    stock = self.packer.make_can_msg("STEER_AND_AP_STALK", 0, dict.fromkeys(STALK_BUTTONS, 1))[1]
+    addr, dat, bus = gwmcan.create_plus_command(self.packer, SimpleNamespace(camera=2), stock)
+    self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, dat)))
+
+  def test_never_at_or_above_the_ceiling(self):
+    for kph in (110, 111, 120, 255):
+      self._driving(kph)
+      self.assertFalse(self._plus(), kph)
+
+  def test_only_with_the_acc_driving(self):
+    for state in (0, 1, 2, 4, 7):
+      self._driving()
+      self._acc(state, 60)
+      self.assertFalse(self._plus(), state)
+
+  def test_nothing_before_the_camera_said_how_the_acc_is(self):
+    self._engage()
+    self._speed(15)
+    self.safety.set_timer(100000000)
+    self.assertFalse(self._plus())
+
+  def test_refused_without_the_option_and_the_minus_flag_is_not_enough(self):
+    for param in (0, GwmSafetyFlags.ACC_MINUS.value):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, param)
+      self.safety.init_tests()
+      self._driving()
+      self.assertFalse(self._plus(), param)
+
+  def test_the_plus_flag_lets_no_minus_through(self):
+    self._driving()
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {"AP_DECREASE_SPEED_COMMAND": 1}, fix_checksum=checksum)))
+
+  def test_refused_stopped_disengaged_or_with_the_driver(self):
+    self._engage()
+    self._acc(3, 60)
+    self.safety.set_timer(100000000)
+    self.assertFalse(self._plus())  # stopped
+    self._driving()
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._plus())
+    self._driving()
+    self._gas(10)
+    self.assertFalse(self._plus())
+    self._gas(0)
+    self._rx_stalk(AP_DECREASE_SPEED_COMMAND=1)
+    self.assertFalse(self._plus())
+    self._rx_stalk()
+    self.assertTrue(self._plus())
+    self._brake(1)
+    self.assertFalse(self._plus())
+
+  def test_only_the_plus_button(self):
+    self._driving()
+    for button in STALK_BUTTONS:
+      if button != "AP_INCREASE_SPEED_COMMAND":
+        self.assertFalse(self._plus(**{button: 1}), button)
+
+  def test_a_budget_per_minute(self):
+    self._driving()
+    for _ in range(104):
+      self.assertTrue(self._plus())
+    self.assertFalse(self._plus())
+    self.safety.set_timer(100000000 + 59999999)
+    self.assertFalse(self._plus())
+    self.safety.set_timer(100000000 + 60000000)
+    self.assertTrue(self._plus())
+
+  def test_a_new_session_clears_it(self):
+    self._driving()
+    for _ in range(104):
+      self._plus()
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gwm, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self.assertFalse(self._plus())  # nothing from the camera yet in this session
+    self._driving()
+    self.assertTrue(self._plus())
+
+  def test_cancel_still_passes_after_the_budget(self):
+    self._driving()
+    for _ in range(110):
+      self._plus()
+    self.assertTrue(self._tx(self.packer.make_can_msg_safety("STEER_AND_AP_STALK", 2, {"AP_CANCEL_COMMAND": 1}, fix_checksum=checksum)))
+
+  def test_original_stalk_held_right_after_our_plus(self):
+    self._driving()
+    self.assertTrue(self._plus())
+    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0xA1))
+    self.safety.set_timer(100000000 + 15000)
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0xA1))
+
+
 class TestGwmBrakeHandoff(GwmStalkTest):
   """The pedal takes a moment to build pressure, and the stock ACC keeps braking for about 0.1 s until it drops. Ours may too."""
   SAFETY_PARAM = GwmSafetyFlags.LONG_CONTROL

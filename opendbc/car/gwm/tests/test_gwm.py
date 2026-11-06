@@ -323,6 +323,40 @@ class TestGwmResume:
     self.CS.steer_and_ap_stalk_msg = None
     assert self._minus(5) == 0
 
+  def _buttons(self, frames, decrease=False, increase=False):
+    CC = structs.CarControl()
+    CC.enabled = True
+    CC.cruiseControl.decrease = decrease
+    CC.cruiseControl.increase = increase
+    CC = CC.as_reader()
+    out = []
+    for _ in range(frames):
+      sent = [dat for addr, dat, _bus in self.cc.update(CC, self.CS, 0)[1] if addr == 0xA1]
+      out.append("+" if sent and sent[0][6] & 0x08 else "-" if sent and sent[0][6] & 0x04 else ".")
+    return "".join(out)
+
+  def test_plus_is_a_press_like_the_drivers_then_a_gap(self):  # CRUISE-01
+    assert self._buttons(13 + 35 + 13, increase=True) == "+" * 13 + "." * 35 + "+" * 13
+
+  def test_plus_only_with_the_acc_driving_a_moving_car_and_nobody_on_the_stalk(self):
+    for attr, value in (("acc_driving", False), ("stalk_idle", False)):
+      setattr(self.CS, attr, value)
+      assert self._buttons(20, increase=True) == "." * 20, attr
+      setattr(self.CS, attr, True)
+    self.CS.out.standstill = True
+    assert self._buttons(20, increase=True) == "." * 20
+    self.CS.out.standstill = False
+    self.CS.steer_and_ap_stalk_msg = None
+    assert self._buttons(20, increase=True) == "." * 20
+
+  def test_the_minus_wins_over_the_plus(self):
+    assert set(self._buttons(13, decrease=True, increase=True)) == {"-"}
+
+  def test_a_plus_never_right_after_a_minus(self):
+    seq = self._buttons(5, decrease=True) + self._buttons(60, increase=True)
+    assert seq.startswith("-----") and "+" in seq
+    assert seq.index("+") - seq.rindex("-") - 1 >= 35  # the gap of the minus, before any plus
+
   def test_no_original_frame_no_cancel(self):
     self.CS.steer_and_ap_stalk_msg = None
     assert self._stalk_frames(5, resume=False, cancel=True) == (0, 0)
