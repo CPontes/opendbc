@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import IntFlag
 
 from opendbc.car.structs import CarParams
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds
@@ -16,6 +17,18 @@ class CarControllerParams:
     self.STEER_DELTA_UP = 4
     self.STEER_DELTA_DOWN = 6
     self.STEER_ERROR_MAX = 80
+
+
+class GwmFlags(IntFlag):
+  SOFT_HANDOFF = 1  # LizPilot's name for it (test channel): nothing here reads it
+
+
+class GwmSafetyFlags(IntFlag):
+  LONG_CONTROL = 1  # the later openpilot longitudinal; this panda ignores every flag
+  # LizPilot's names for its own features (test channel): this panda ignores them, and LizPilot keeps them off
+  ALWAYS_ON_LATERAL = 2
+  AUTO_RESUME = 4
+  ACC_MINUS = 8
 
 
 @dataclass
