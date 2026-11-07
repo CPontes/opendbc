@@ -280,6 +280,14 @@ class TestSignals:
     ret = Car().step(**{STALK: {"STEERING_RATE": 12, "RATE_DIRECTION": direction}})
     assert ret.steeringRateDeg == pytest.approx(sign * 12, abs=0.01)
 
+  def test_steering_rate_counts_are_a_fifth_of_a_degree_per_second(self):
+    # On the bus a lane change turns the wheel at ~100 counts (20 deg/s): the raw field, not the DBC, decides the scale
+    packer = CANPacker(DBC[CAR.GWM_HAVAL_H6][Bus.pt])
+    dat = packer.make_can_msg(STALK, 0, {"STEERING_RATE": 20.0})[1]
+    raw = ((dat[3] & 0x3f) << 6) | (dat[4] >> 2)  # 12 bits, big endian from bit 29
+    assert raw == 100
+    assert Car().step(**{STALK: {"STEERING_RATE": 20.0, "RATE_DIRECTION": 1}}).steeringRateDeg == pytest.approx(-20.0)
+
   @pytest.mark.parametrize("torque,pressed", [(0, False), (50, False), (-50, False), (51, True), (-51, True)])
   def test_driver_torque(self, torque, pressed):
     ret = Car().step(RX_STEER_RELATED={"B_RX_DRIVER_TORQUE": torque})
