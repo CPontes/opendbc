@@ -25,6 +25,11 @@ class GwmFlags(IntFlag):
   # Hexa: a light push against openpilot fades its torque out instead of cutting it. Not a panda flag: the panda takes
   # any fade down with the request on
   SOFT_HANDOFF = 1
+  # Hexa: the driver only counts as against openpilot when against both the request and the torque going out. In a
+  # reversal the request crosses zero while the applied torque still points the old way: a driver helping it isn't
+  # against openpilot, and cutting it then dropped the help at once. Not a panda flag: the panda limits the torque by the
+  # EPS, not by the driver
+  OPPOSE_BOTH = 2
 
 
 class GwmSafetyFlags(IntFlag):

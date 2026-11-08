@@ -187,6 +187,124 @@ class TestGwmSoftHandoffOff(TestGwmCarController):
     assert self._steer(1.0, -120, frames=2) == 0
 
 
+# A reversal recorded on the Haval (LAT-01, 08/11): openpilot's request swings from full left to full right in 0.2 s while
+# the driver pushes left the whole time (1.2 to 2.4 Nm). 100 Hz, from 0.3 s before the rule of today let go to 0.5 s after;
+# it had 241 out, and dropped it to 0 at once.
+REVERSAL_REQUEST = [1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000,
+  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 0.953, 0.822, 0.690, 0.557, 0.425, 0.282, 0.133,
+  -0.015, -0.287, -0.289, -0.522, -0.535, -0.660, -0.753, -0.798, -0.834, -0.867, -0.892, -0.974, -1.000, -1.000,
+  -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000,
+  -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000,
+  -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000, -1.000]
+REVERSAL_DRIVER = [122, 131, 131, 133, 133, 140, 140, 135, 135, 139, 139, 128, 128, 145, 145, 159, 159, 156, 156,
+  161, 161, 169, 169, 172, 172, 152, 152, 159, 159, 171, 171, 189, 189, 203, 203, 168, 168, 168, 168, 196, 196, 185,
+  185, 201, 201, 225, 225, 194, 194, 187, 187, 198, 198, 204, 204, 191, 191, 190, 190, 200, 200, 201, 201, 191, 191,
+  219, 219, 200, 200, 191, 191, 240, 240, 236, 236, 224, 224, 227, 227, 236]
+
+
+class TestGwmOpposeBoth(TestGwmCarController):
+  # with GwmFlags.OPPOSE_BOTH the driver only counts as against openpilot when against the request and the torque going out;
+  # every test of TestGwmCarController runs here too
+  FLAGS = GwmFlags.OPPOSE_BOTH.value
+
+  def setup_method(self):
+    super().setup_method()
+    CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
+    CP.flags |= self.FLAGS
+    self.cc = CarInterface(CP).CC
+
+  def _replay(self, request, driver, warmup=200, tail=150):
+    """the recorded request and driver at 100 Hz, after warmup frames of the first sample and before tail frames of the last;
+    the EPS follows what went out. Returns (torque out, requested) at each 50 Hz frame of the recorded part and the tail"""
+    request = [request[0]] * warmup + list(request) + [request[-1]] * tail
+    driver = [driver[0]] * warmup + list(driver) + [driver[-1]] * tail
+    self.CS.out.vEgo = 15.
+    out, applied = [], 0
+    for k, (r, d) in enumerate(zip(request, driver, strict=True)):
+      CC = structs.CarControl()
+      CC.latActive = CC.enabled = True
+      CC.actuators.torque = r
+      self.CS.out.steeringTorque = d
+      self.CS.out.steeringTorqueEps = applied
+      actuators, _ = self.cc.update(CC.as_reader(), self.CS, 0)
+      if self.cc.frame % 2 == 1:  # the frame that just ran sent the steering
+        applied = actuators.torqueOutputCan
+        if k >= warmup:
+          out.append((applied, self.cc.lat_active))
+    return out
+
+  def test_the_reversal_comes_down_at_the_panda_rate(self):
+    out = self._replay(REVERSAL_REQUEST, REVERSAL_DRIVER)
+    torque = [o[0] for o in out]
+    assert torque[0] == 253
+    # never a step, never back up; the last step may land on 0 from 7 (a 1 goes out as 0: the EPS faults on a repeated 1)
+    assert all(0 <= a - b <= 6 or (b == 0 and a <= 7) for a, b in zip(torque, torque[1:], strict=False))
+    assert min(torque) >= 0  # never pushes on the driver, who is pushing left
+    first_zero = torque.index(0)
+    assert all(o[1] for o in out[:first_zero])  # requested while there is torque
+    assert all(o == (0, False) for o in out[first_zero + 1:])  # then lets go: the driver is against both
+
+  def test_against_the_request_and_the_torque_lets_go_at_once(self):
+    self._steer(1.0, 0, frames=200)
+    assert self._steer(1.0, -150, frames=2) == 0 and not self.cc.lat_active
+
+  def test_the_panda_takes_every_frame_of_the_reversal(self):
+    # in a closed loop the EPS follows what went out, as in the car. In the log replay the EPS is the recorded one, of the
+    # rule of today (it had cut): there the panda refused 8 frames of one eased reversal for that reason alone (LAT-01)
+    from opendbc.car.structs import CarParams
+    from opendbc.safety.tests.libsafety import libsafety_py
+    from opendbc.safety.tests.test_gwm import GwmPacker, opendbc as safety_dbc
+    safety = libsafety_py.libsafety
+    safety.set_safety_hooks(CarParams.SafetyModel.gwm, 0)
+    safety.init_tests()
+    safety.set_controls_allowed(True)
+    packer = GwmPacker(safety_dbc)
+    request = [REVERSAL_REQUEST[0]] * 200 + REVERSAL_REQUEST + [REVERSAL_REQUEST[-1]] * 150
+    driver = [REVERSAL_DRIVER[0]] * 200 + REVERSAL_DRIVER + [REVERSAL_DRIVER[-1]] * 150
+    self.CS.out.vEgo = 15.
+    applied, sent, refused = 0, 0, 0
+    for k, (r, d) in enumerate(zip(request, driver, strict=True)):
+      safety.set_timer(k * 10_000)
+      assert safety.safety_rx_hook(packer.make_can_msg_safety("RX_STEER_RELATED", 0, {"B_RX_EPS_TORQUE": applied}))
+      CC = structs.CarControl()
+      CC.latActive = CC.enabled = True
+      CC.actuators.torque = r
+      self.CS.out.steeringTorque = d
+      self.CS.out.steeringTorqueEps = applied
+      actuators, sends = self.cc.update(CC.as_reader(), self.CS, 0)
+      for addr, dat, bus in sends:
+        if addr == 0x12B:
+          sent += 1
+          refused += not safety.safety_tx_hook(libsafety_py.make_CANPacket(addr, bus, dat))
+      if self.cc.frame % 2 == 1:  # the frame that just ran sent the steering
+        applied = actuators.torqueOutputCan
+    assert sent > 150 and refused == 0
+    assert safety.get_controls_allowed()
+
+  def test_with_no_torque_out_the_request_decides(self):
+    # zero going out is on both sides: as today
+    assert self._steer(1.0, -150) == 0
+    assert self._steer(1.0, 150) > 0
+
+
+class TestGwmOpposeBothOff(TestGwmOpposeBoth):
+  FLAGS = 0
+
+  def test_the_reversal_comes_down_at_the_panda_rate(self):
+    # off by default: the rule of today drops the help at once, as recorded
+    torque = [o[0] for o in self._replay(REVERSAL_REQUEST, REVERSAL_DRIVER)]
+    assert max(a - b for a, b in zip(torque, torque[1:], strict=False)) >= 200 and torque[-1] == 0
+
+
+class TestGwmOpposeBothWithSoftHandoff(TestGwmOpposeBoth):
+  # with both: the reversal still comes down at the panda's rate; a light push against both fades as the soft handoff does
+  FLAGS = GwmFlags.OPPOSE_BOTH.value | GwmFlags.SOFT_HANDOFF.value
+
+  def test_against_the_request_and_the_torque_lets_go_at_once(self):
+    self._steer(1.0, 0, frames=200)
+    assert self._steer(1.0, -160, frames=2) == 0 and not self.cc.lat_active  # firm: at once, as the soft handoff
+
+
 class TestGwmSteerFault:
   def _fault(self, lat_active, frames=150):
     CI = CarInterface(CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6))

@@ -105,7 +105,12 @@ class CarController(CarControllerBase):
     # Only let go when the driver steers against openpilot. In tight curves the driver usually helps in the
     # same direction because openpilot is torque limited, and cutting the torque then left them alone mid-curve.
     driver_opposing = CS.out.steeringTorque * actuators.torque <= 0
-    pushing = abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing
+    # Hexa (GwmFlags.OPPOSE_BOTH): in a reversal the request flips before the torque going out does. A driver against the
+    # request but with the torque going out isn't against openpilot: the torque comes down to zero at the panda's rate and
+    # only then lets go, never pushing on the driver. Cutting it dropped the help at once
+    easing = bool(self.CP.flags & GwmFlags.OPPOSE_BOTH) and abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing and \
+             CS.out.steeringTorque * self.apply_torque_last > 0
+    pushing = abs(CS.out.steeringTorque) >= MAX_USER_TORQUE and driver_opposing and not easing
     lat_active = CC.latActive and not pushing
     fading = CC.latActive and pushing and bool(self.CP.flags & GwmFlags.SOFT_HANDOFF) and \
              abs(CS.out.steeringTorque) < SOFT_HANDOFF_MAX_TORQUE
@@ -177,11 +182,11 @@ class CarController(CarControllerBase):
       # Between transmit cycles, keep the state of the last emitted command.
       self.lat_active = False
       # Steer command
-      new_torque = 0 if fading else int(round(actuators.torque * self.params.STEER_MAX))
+      new_torque = 0 if (fading or easing) else int(round(actuators.torque * self.params.STEER_MAX))
       apply_torque = apply_meas_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorqueEps, self.params)
       # Prevent sending the same 'apply_torque = 1' torque repeatedly, as it can cause EPS faults.
       if abs(apply_torque) == 1:
-        apply_torque = 0 if fading else apply_torque * 2
+        apply_torque = 0 if (fading or easing) else apply_torque * 2
       # fading out, the request stays until the torque is gone
       steer_req = lat_active or (fading and apply_torque != 0)
       if not steer_req or CS.camera_stock_data is None:
