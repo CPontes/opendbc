@@ -213,16 +213,17 @@ class TestGwmOpposeBoth(TestGwmCarController):
     CP.flags |= self.FLAGS
     self.cc = CarInterface(CP).CC
 
-  def _replay(self, request, driver, warmup=200, tail=150):
+  def _replay(self, request, driver, warmup=200, tail=150, disengage_at=None):
     """the recorded request and driver at 100 Hz, after warmup frames of the first sample and before tail frames of the last;
-    the EPS follows what went out. Returns (torque out, requested) at each 50 Hz frame of the recorded part and the tail"""
+    the EPS follows what went out. Returns (torque out, requested) at each 50 Hz frame of the recorded part and the tail.
+    disengage_at: the 100 Hz frame, counted from the end of the warmup, from which openpilot no longer steers"""
     request = [request[0]] * warmup + list(request) + [request[-1]] * tail
     driver = [driver[0]] * warmup + list(driver) + [driver[-1]] * tail
     self.CS.out.vEgo = 15.
     out, applied = [], 0
     for k, (r, d) in enumerate(zip(request, driver, strict=True)):
       CC = structs.CarControl()
-      CC.latActive = CC.enabled = True
+      CC.latActive = CC.enabled = disengage_at is None or k < warmup + disengage_at
       CC.actuators.torque = r
       self.CS.out.steeringTorque = d
       self.CS.out.steeringTorqueEps = applied
@@ -243,14 +244,36 @@ class TestGwmOpposeBoth(TestGwmCarController):
     first_zero = torque.index(0)
     assert all(o[1] for o in out[:first_zero])  # requested while there is torque
     assert all(o == (0, False) for o in out[first_zero + 1:])  # then lets go: the driver is against both
+    assert torque[first_zero - 1] == 7 and 2 not in torque  # from 253 the last step lands on 1: it goes out as 0, never as 2
+
+  def test_from_250_it_never_crosses(self):
+    # from 253 the last step of 6 lands on 1, which goes out as 0 anyway: from 250 it lands on 4, and the next step shows the
+    # target. Coming down to zero it stops there; towards the request on the other side it would push the driver (the QA)
+    torque = [o[0] for o in self._replay([250 / 253, -1.], [150, 150], tail=200)]
+    assert torque[0] == 250 and 4 in torque
+    assert min(torque) >= 0 and torque[-1] == 0
+
+  def test_a_light_hand_is_not_eased(self):
+    # under 1 Nm the driver isn't against openpilot at all: the torque follows the request across zero, without stopping there
+    torque = [o[0] for o in self._replay([250 / 253, -1.], [60, 60], tail=200)]
+    last_positive = max(i for i, t in enumerate(torque) if t > 0)
+    assert torque[last_positive + 1] < 0 and min(torque) < -100
+
+  def test_disengaged_mid_descent_it_is_zero_in_the_same_send(self):
+    # openpilot no longer steers: the torque goes to 0 with the request in the first send after, the descent doesn't go on
+    out = self._replay(REVERSAL_REQUEST, REVERSAL_DRIVER, disengage_at=len(REVERSAL_REQUEST))
+    eased = len(REVERSAL_REQUEST) // 2  # the recorded part, at 50 Hz: the help was coming down
+    assert 0 < out[eased - 1][0] < 253
+    assert all(o == (0, False) for o in out[eased:])
 
   def test_against_the_request_and_the_torque_lets_go_at_once(self):
     self._steer(1.0, 0, frames=200)
     assert self._steer(1.0, -150, frames=2) == 0 and not self.cc.lat_active
 
   def test_the_panda_takes_every_frame_of_the_reversal(self):
-    # in a closed loop the EPS follows what went out, as in the car. In the log replay the EPS is the recorded one, of the
-    # rule of today (it had cut): there the panda refused 8 frames of one eased reversal for that reason alone (LAT-01)
+    # in a closed loop the EPS follows what went out, as in the car, and the panda takes every frame. (In the log replay the
+    # panda refused 8 frames of one eased reversal: there it had already taken control away, the ACC off, while openpilot
+    # still steered; the torque was within what it measured. LAT-01, the QA's notice)
     from opendbc.car.structs import CarParams
     from opendbc.safety.tests.libsafety import libsafety_py
     from opendbc.safety.tests.test_gwm import GwmPacker, opendbc as safety_dbc
@@ -294,6 +317,17 @@ class TestGwmOpposeBothOff(TestGwmOpposeBoth):
     # off by default: the rule of today drops the help at once, as recorded
     torque = [o[0] for o in self._replay(REVERSAL_REQUEST, REVERSAL_DRIVER)]
     assert max(a - b for a, b in zip(torque, torque[1:], strict=False)) >= 200 and torque[-1] == 0
+
+  def test_from_250_it_never_crosses(self):
+    # off: from 250 too it drops at once, and never to the other side
+    torque = [o[0] for o in self._replay([250 / 253, -1.], [150, 150], tail=200)]
+    assert torque[0] == 250 and max(a - b for a, b in zip(torque, torque[1:], strict=False)) >= 200
+    assert min(torque) >= 0 and torque[-1] == 0
+
+  def test_disengaged_mid_descent_it_is_zero_in_the_same_send(self):
+    # off: there is no descent, it had already let go; disengaged, it stays at 0
+    out = self._replay(REVERSAL_REQUEST, REVERSAL_DRIVER, disengage_at=len(REVERSAL_REQUEST))
+    assert all(o == (0, False) for o in out[len(REVERSAL_REQUEST) // 2:])
 
 
 class TestGwmOpposeBothWithSoftHandoff(TestGwmOpposeBoth):
