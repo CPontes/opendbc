@@ -522,6 +522,10 @@ TAP_4B = ([("stopping", -0.75, True, False)] * 30 + [("stopping", 0., False, Tru
 TAP_4B_BACK = 58  # the first frame back
 TAP_4B_CAMERA_LETS_GO = 43  # the camera went from its hold to the gas 0.13 s into the pedal
 TAP_4B_PEDAL = 0.07  # how far down the pedal went, at most (18 in the byte)
+# LONG-08: the planner's flicker at a stop on route 40 (2 min), one tuple per 100 Hz frame: the longitudinal state and the
+# acceleration. 50 ms of asking for gas, then stopping again; there it sent a frame of gas and the pressure went to 0
+FLICKER_40 = ([("stopping", -0.76)] * 4 + [("stopping", 0.1)] + [("pid", 0.1)] * 5 + [("pid", -0.01)] +
+              [("stopping", round(-0.02 - 0.01 * k, 2)) for k in range(9)])
 
 
 class TestGwmLongitudinal:
@@ -1093,6 +1097,24 @@ class TestGwmLongitudinal:
     self.CS.gas_pedal = 0.
     return self.back()
 
+  def replay_flicker(self, seq):
+    LongCtrlState = structs.CarControl.Actuators.LongControlState
+    out = []
+    for state, accel in seq:
+      CC = structs.CarControl()
+      CC.enabled = CC.longActive = True
+      CC.actuators.accel = accel
+      CC.actuators.longControlState = getattr(LongCtrlState, state)
+      for addr, dat, _bus in self.cc.update(CC.as_reader(), self.CS, 0)[1]:
+        if addr == 0x143:
+          out.append((dat[9] & 0x1F, 181 - dat[13]))
+    return out
+
+  def test_without_the_wait_option_a_flicker_sends_gas(self):
+    # LONG-08 off: the recorded flicker of route 40 sends a frame of gas, as before
+    self.held_stop()
+    assert 12 in {m for m, _ in self.replay_flicker(FLICKER_40)}
+
   def test_without_the_tap_option_the_pedal_takes_the_hold_at_once(self):
     # LONG-07 off: once the camera resumes, the pedal's frame is the gas override, as before
     self.held_stop()
@@ -1400,3 +1422,136 @@ class TestGwmGasTapHold(TestGwmLongitudinal):
   def test_without_the_option_a_touch_comes_back_as_before(self):
     # with the option: back at the stock hold (as with GAS_TOUCH_HOLD)
     self.test_a_touch_keeps_our_hold_with_no_brake()
+
+
+class TestGwmStartWait(TestGwmLongitudinal):
+  # LONG-08 with the option on (GwmFlags.START_WAIT): every longitudinal test above runs with it too
+  FLAGS = GwmFlags.START_WAIT
+
+  def asks(self, frames, accel=0.3, state=structs.CarControl.Actuators.LongControlState.pid):
+    return [self.send(accel, state=state)[:2] for _ in range(frames)]
+
+  def test_the_recorded_flicker_keeps_the_hold(self):
+    self.held_stop()
+    assert set(self.replay_flicker(FLICKER_40)) == {(25, 81)}  # no frame of gas, the hold of LONG-04 all along
+
+  def test_a_request_that_lasts_goes_after_0_15_s(self):
+    self.held_stop()
+    modes = [m for m, _ in self.asks(10)]
+    assert modes[:8] == [25] * 8 and modes[8] == 12  # 0.14 s held, at 0.16 s the gas, in that frame
+
+  def test_starting_counts_as_asking(self):
+    self.held_stop()
+    modes = [m for m, _ in self.asks(10, accel=0.5, state=structs.CarControl.Actuators.LongControlState.starting)]
+    assert modes[:8] == [25] * 8 and modes[8] == 12
+
+  def test_while_it_waits_it_is_the_hold_it_had(self):
+    self.held_stop()
+    assert set(self.asks(7)) == {(25, 81)}
+
+  def test_a_new_request_waits_again(self):
+    self.held_stop()
+    self.asks(3)
+    self.stop(v_ego=0., frames=10)
+    assert [m for m, _ in self.asks(9)] == [25] * 8 + [12]
+
+  def test_moving_nothing_changes(self):
+    self.settle(0.3)
+    assert self.send(0.3)[0] == 12
+    self.setup_method()
+    self.held_stop()
+    self.CS.out.standstill = False  # the wheels already turning: a departure under way
+    self.CS.out.vEgo = 0.02
+    assert self.send(0.3)[0] == 12
+
+  def test_openpilot_letting_go_ends_the_wait(self):
+    # a frame out of control in the middle of the wait: back with the planner asking for gas, no new wait, as before
+    self.held_stop()
+    self.asks(2)
+    self.send(0.3, active=False)
+    assert self.send(0.3)[0] == 12
+
+  def test_out_of_our_hold_no_wait(self):
+    self.stopped()
+    assert self.send(0.3)[0] == 12  # stopped but not held by us: as before
+
+  def same_as_without(self, steps):
+    # the same steps through a controller without the option: the frames must match
+    out = steps(self)
+    other = TestGwmLongitudinal()
+    other.setup_method()
+    return out, steps(other)
+
+  def test_the_driver_gas_wins_at_once(self):
+    def steps(t):
+      t.held_stop()
+      t.stock(12 | 0x40)
+      t.send(0.3)
+      return t.press(3)
+    mine, theirs = self.same_as_without(steps)
+    assert mine == theirs and {m for m, *_ in mine} == {20}
+
+  def test_the_brake_wins_at_once(self):
+    def steps(t):
+      t.held_stop()
+      t.send(0.3)
+      t.pedal()
+      return [t.frame(0., state=structs.CarControl.Actuators.LongControlState.off, active=False, enabled=True)[9] & 0x1F
+              for _ in range(3)]
+    mine, theirs = self.same_as_without(steps)
+    assert mine == theirs
+
+  def test_cancel_wins_at_once(self):
+    def steps(t):
+      t.held_stop()
+      t.send(0.3)
+      return [t.send(0.3, active=False) for _ in range(3)]
+    mine, theirs = self.same_as_without(steps)
+    assert mine == theirs and {b for _, b, _ in mine} == {0}
+
+  def test_the_panda_takes_the_wait(self):
+    from opendbc.car.gwm.values import GwmSafetyFlags
+    from opendbc.car.structs import CarParams
+    from opendbc.safety.tests.libsafety import libsafety_py
+    from opendbc.safety.tests.test_gwm import GwmPacker, checksum, opendbc as safety_dbc
+    safety = libsafety_py.libsafety
+    safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL)
+    safety.init_tests()
+    safety.set_controls_allowed(True)
+    packer = GwmPacker(safety_dbc)
+    self.held_stop()
+    LongCtrlState = structs.CarControl.Actuators.LongControlState
+    refused = sent = 0
+    for k, (state, accel) in enumerate(FLICKER_40 + [("pid", 0.3)] * 20):
+      safety.set_timer(k * 10_000)
+      speed = {f"{w}_WHEEL_SPEED": 0. for w in ("FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT")}
+      assert safety.safety_rx_hook(packer.make_can_msg_safety("WHEEL_SPEEDS", 0, speed, fix_checksum=checksum))
+      CC = structs.CarControl()
+      CC.enabled = CC.longActive = True
+      CC.actuators.accel = accel
+      CC.actuators.longControlState = getattr(LongCtrlState, state)
+      for addr, dat, bus in self.cc.update(CC.as_reader(), self.CS, 0)[1]:
+        if addr == 0x143:
+          sent += 1
+          refused += not safety.safety_tx_hook(libsafety_py.make_CANPacket(addr, bus, dat))
+    assert sent > 15 and refused == 0 and safety.get_controls_allowed()
+
+  def test_without_the_wait_option_a_flicker_sends_gas(self):
+    # with the option: the hold all along (the test above)
+    self.test_the_recorded_flicker_keeps_the_hold()
+
+  def test_a_stop_back_before_the_car_moves_keeps_the_hold(self):
+    # LONG-04's flicker with the option: no frame of gas at all, the hold stays at 81
+    self.stop(frames=200)
+    self.stopped()
+    for _ in range(3):
+      assert self.send(0.1)[:2] == (25, 81)
+      assert self.stop(-0.01, v_ego=0.)[:2] == (25, 81)
+
+  def test_with_the_pedal_the_kept_hold_does_not_come_back(self):
+    # with the option the flicker sent no gas, so the hold was still 81 when the pedal came: the pedal keeps it there, never more
+    self.stop(frames=200)
+    self.stopped()
+    self.send(0.1)
+    self.pedal()
+    assert self.stop(-0.01, v_ego=0.)[1] == 81

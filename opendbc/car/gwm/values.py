@@ -37,6 +37,9 @@ class GwmFlags(IntFlag):
   # while the pedal is down, and openpilot comes back at the stock hold, as with GAS_TOUCH_HOLD. Longer or firmer, as before. Not a
   # panda flag: the panda takes the hold with no brake from a stopped car
   GAS_TAP_HOLD = 8
+  # Hexa: at a stop of ours, the planner asking for gas lets the hold go only once the request has lasted 0.15 s: a flicker between
+  # stopping and going keeps the hold. Not a panda flag: the hold with openpilot in control already goes out
+  START_WAIT = 16
 
 
 class GwmSafetyFlags(IntFlag):

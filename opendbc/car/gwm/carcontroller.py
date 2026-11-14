@@ -80,6 +80,12 @@ ROLLBACK_HOLD_TIME = 1.  # s
 # pedal, the wheels turning (the panda's "moving"), the brake or openpilot disengaged: as before, in the same frame
 GAS_TAP_TIME = 0.35  # s
 GAS_TAP_PEDAL = 0.35  # of the pedal
+# Hexa (GwmFlags.START_WAIT): at a stop of ours, the planner asking for gas lets the hold go only once the request has lasted. Its
+# flickers between stopping and going sent a frame of gas that took the pressure away with the car stopped (route 40, 2 min: 50
+# ms, after the stalk was pulled). From a stop we held, the flickers lasted 50 ms at the median and the real departures 7.6 s, and the
+# car took 1.25 s from the request to move (63 and 147 of them, long08/vaivem.py). Waiting 0.15 s takes 46 of the 63 flickers.
+# The driver's gas, brake or cancel take openpilot out at once, as before; moving, nothing changes
+START_WAIT_TIME = 0.15  # s
 
 
 class CarController(CarControllerBase):
@@ -103,6 +109,7 @@ class CarController(CarControllerBase):
     self.rollback_left = 0.  # s
     self.gas_at_stop = False  # the driver touched the gas while we held the car stopped, and it hasn't moved since
     self.gas_tap: float | None = None  # how long the gas has been pressed from a stop we held; None with no pedal; past the time, out
+    self.start_wait: float | None = None  # how long the planner has asked for gas from a stop we held; None when it isn't
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -273,7 +280,15 @@ class CarController(CarControllerBase):
                    CS.gas_pedal <= GAS_TAP_PEDAL and CS.out.standstill and not CS.out.brakePressed and CC.enabled
         if self.gas_tap is not None and not tap_hold:
           self.gas_tap = GAS_TAP_TIME
-        brake_wanted = standstill or rolled_back or back_from_gas or self.accel < (brake_off if self.braking else BRAKE_ON)
+        # the planner asking for gas from a stop we hold, timed from its first frame; with the wheels stopped and openpilot in control
+        asks_gas = actuators.longControlState in (LongCtrlState.pid, LongCtrlState.starting) and actuators.accel > 0.
+        if bool(self.CP.flags & GwmFlags.START_WAIT) and CC.longActive and asks_gas and CS.out.standstill and \
+           (self.holding or self.start_wait is not None):
+          self.start_wait = 0. if self.start_wait is None else self.start_wait + DT_CTRL * self.params.STEER_STEP
+        else:
+          self.start_wait = None
+        start_waiting = self.start_wait is not None and self.start_wait < START_WAIT_TIME
+        brake_wanted = standstill or rolled_back or back_from_gas or start_waiting or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         was_braking = self.braking
@@ -294,6 +309,7 @@ class CarController(CarControllerBase):
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
         # it starts stopping, and stays while there's braking near a stop: a frame out of stopping must not drop it to regen
         near_stop = CS.out.vEgo < HOLD_SPEED
+        # (a wait for the planner's request keeps braking, and the hold it had carries on: the car is stopped)
         self.holding = self.braking and (rolled_back or back_from_gas or (standstill and (self.holding or near_stop)) or
                                          (self.holding and near_stop))
         if self.holding:
