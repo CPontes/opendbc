@@ -30,6 +30,9 @@ class GwmFlags(IntFlag):
   # against openpilot, and cutting it then dropped the help at once. Not a panda flag: the panda limits the torque by the
   # EPS, not by the driver
   OPPOSE_BOTH = 2
+  # Hexa: back from a touch of the gas at a stop of ours, with the car never moving, the stock hold at once and no frame of gas.
+  # Not a panda flag: the panda takes the hold with openpilot in control and the pedal off
+  GAS_TOUCH_HOLD = 4
 
 
 class GwmSafetyFlags(IntFlag):

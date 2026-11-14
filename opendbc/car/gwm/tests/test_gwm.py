@@ -514,10 +514,22 @@ class TestGwmResume:
     assert self._stalk_frames(5, resume=False, cancel=True) == (0, 0)
 
 
+# LONG-06: a touch of the gas at a stop, as openpilot sent it on route 4b (14 min), one tuple per 100 Hz frame: the longitudinal
+# state, the acceleration, longActive and the gas pedal. The pedal for 0.28 s, openpilot back with the longitudinal still off for a
+# frame, the car never moving. Only the numbers of the request and the pedal
+TAP_4B = ([("stopping", -0.75, True, False)] * 30 + [("stopping", 0., False, True)] + [("off", 0., False, True)] * 27 +
+          [("off", -0.01, True, False)] + [("stopping", round(-0.02 - 0.01 * k, 2), True, False) for k in range(32)])
+TAP_4B_BACK = 58  # the first frame back
+TAP_4B_CAMERA_LETS_GO = 43  # the camera went from its hold to the gas 0.13 s into the pedal
+
+
 class TestGwmLongitudinal:
+  FLAGS = 0
+
   def setup_method(self):
     CP = CarInterface.get_non_essential_params(CAR.GWM_HAVAL_H6)
     CP.openpilotLongitudinalControl = True
+    CP.flags |= int(self.FLAGS)
     self.cc = CarInterface(CP).CC
     dbc = DBC(GWM_DBC[CP.carFingerprint][Bus.pt])
     self.CS = SimpleNamespace(out=structs.CarState(), camera_stock_data=None, eps_stock_data=None, hud_stock_data=None,
@@ -529,9 +541,9 @@ class TestGwmLongitudinal:
     frame = self.frame(accel, pitch, state, active)
     return frame[9] & 0x1F, 181 - frame[13], ((frame[27] & 0x1F) << 8 | frame[28]) - 192
 
-  def frame(self, accel, pitch=0., state=None, active=True):
+  def frame(self, accel, pitch=0., state=None, active=True, enabled=None):
     CC = structs.CarControl()
-    CC.enabled = active
+    CC.enabled = active if enabled is None else enabled
     CC.longActive = active
     CC.actuators.accel = accel
     CC.actuators.longControlState = state if state is not None else structs.CarControl.Actuators.LongControlState.pid
@@ -990,6 +1002,53 @@ class TestGwmLongitudinal:
   def test_the_hold_is_only_for_openpilot_driving(self):
     assert self.stop(active=False)[1:] == (0, 0)
 
+  # LONG-06: back from a touch of the gas at a stop. On route 4b (14 min) the first frame back was a frame of gas and the hold climbed
+  # again from 42; the pressure, already falling, went to 0 with the car stopped
+  def touch_gas(self, frames=14, v_ego=0., enabled=True, first_active=False):
+    # the driver on the gas for frames x 20 ms: openpilot lets go of the longitudinal and stays engaged
+    off = structs.CarControl.Actuators.LongControlState.off
+    self.CS.out.gasPressed = True
+    self.CS.out.vEgo = v_ego
+    self.CS.out.standstill = v_ego == 0.
+    if first_active:  # openpilot lets go a frame after the pedal
+      self.frame(0., state=structs.CarControl.Actuators.LongControlState.stopping)
+    for _ in range(frames):
+      self.frame(0., state=off, active=False, enabled=enabled)
+    self.CS.out.gasPressed = False
+
+  def back(self, accel=-0.01, state=structs.CarControl.Actuators.LongControlState.off):
+    # the first frame back, the car stopped: openpilot sends it before the planner is stopping again
+    self.CS.out.vEgo = 0.
+    self.CS.out.standstill = True
+    return self.send(accel, state=state)
+
+  def held_stop(self):
+    self.stopped()
+    self.stop(v_ego=0., frames=200)
+
+  def replay_touch(self, seq, panda=None):
+    LongCtrlState = structs.CarControl.Actuators.LongControlState
+    out = []
+    for k, (state, accel, active, gas) in enumerate(seq):
+      CC = structs.CarControl()
+      CC.enabled = True
+      CC.longActive = active
+      CC.actuators.accel = accel
+      CC.actuators.longControlState = getattr(LongCtrlState, state)
+      self.CS.out.gasPressed = gas
+      if panda is not None:
+        panda(k, gas)
+      for addr, dat, bus in self.cc.update(CC.as_reader(), self.CS, 0)[1]:
+        if addr == 0x143:
+          out.append((k, dat[9] & 0x1F, 181 - dat[13], addr, dat, bus))
+    return out
+
+  def test_without_the_option_a_touch_comes_back_as_before(self):
+    # LONG-06 off, the default: the first frame back is a frame of gas and the hold climbs again from nothing, as on route 4b
+    self.held_stop()
+    back = [(m, b) for k, m, b, *_ in self.replay_touch(TAP_4B) if k >= TAP_4B_BACK]
+    assert back[0][0] == 12 and back[1][0] == 25 and back[1][1] < 50
+
   def rolling_back(self, gear=structs.CarState.GearShifter.drive, gas=False):
     self.CS.rolling_back = True
     self.CS.out.gearShifter = gear
@@ -1071,3 +1130,130 @@ class TestGwmLongitudinal:
     assert self.send(1., active=False)[1:] == (0, 0)
     self.send(-2.)
     assert self.send(-2., active=False)[1:] == (0, 0)
+
+
+class TestGwmGasTouchHold(TestGwmLongitudinal):
+  # LONG-06 with the option on (GwmFlags.GAS_TOUCH_HOLD): every longitudinal test above runs with it too
+  FLAGS = GwmFlags.GAS_TOUCH_HOLD
+
+  def test_back_from_a_touch_of_the_gas_is_the_stock_hold_at_once(self):
+    self.held_stop()
+    self.touch_gas()
+    assert self.back()[:2] == (25, 81)  # no frame of gas, no hold from nothing
+    assert {self.stop(-0.02 - 0.01 * k, v_ego=0.)[:2] for k in range(30)} == {(25, 81)}
+
+  def test_the_recorded_touch_comes_back_at_the_hold_with_no_frame_of_gas(self):
+    self.held_stop()
+    assert self.cc.frame % 2 == 0  # the first frame back is a frame that sends, as it was on route 4b
+    out = self.replay_touch(TAP_4B)
+    assert 12 not in {m for _k, m, *_ in out}
+    back = [(m, b) for k, m, b, *_ in out if k >= TAP_4B_BACK]
+    assert out[[k for k, *_ in out].index(TAP_4B_BACK)][1:3] == (25, 81) and set(back) == {(25, 81)}
+
+  def test_the_panda_takes_every_frame_of_the_recorded_touch(self):
+    # the camera holds, then lets go to the gas 0.13 s into the pedal, as on route 4b; the panda sees the car stopped and the pedal
+    from opendbc.car.gwm.values import GwmSafetyFlags
+    from opendbc.car.structs import CarParams
+    from opendbc.safety.tests.libsafety import libsafety_py
+    from opendbc.safety.tests.test_gwm import GwmPacker, checksum, opendbc as safety_dbc
+    safety = libsafety_py.libsafety
+    safety.set_safety_hooks(CarParams.SafetyModel.gwm, GwmSafetyFlags.LONG_CONTROL)
+    safety.init_tests()
+    safety.set_controls_allowed(True)
+    packer = GwmPacker(safety_dbc)
+    self.held_stop()
+    self.stock(25)
+
+    def panda(k, gas):
+      safety.set_timer(k * 10_000)
+      if k == TAP_4B_CAMERA_LETS_GO:
+        self.stock(12)
+      speed = {f"{w}_WHEEL_SPEED": 0. for w in ("FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT")}
+      assert safety.safety_rx_hook(packer.make_can_msg_safety("WHEEL_SPEEDS", 0, speed, fix_checksum=checksum))
+      assert safety.safety_rx_hook(packer.make_can_msg_safety("CAR_OVERALL_SIGNALS2", 0, {"GAS_POSITION": 20 if gas else 0}))
+
+    out = self.replay_touch(TAP_4B, panda)
+    refused = [k for k, _m, _b, addr, dat, bus in out if not safety.safety_tx_hook(libsafety_py.make_CANPacket(addr, bus, dat))]
+    modes = {m for k, m, *_ in out if TAP_4B_BACK > k > TAP_4B_CAMERA_LETS_GO}
+    assert modes == {20} and refused == [] and safety.get_controls_allowed()  # on the pedal, the camera's own gas override
+
+  def test_openpilot_letting_go_a_frame_after_the_pedal_also_comes_back_at_the_hold(self):
+    self.held_stop()
+    self.touch_gas(first_active=True)
+    assert self.back()[:2] == (25, 81)
+
+  def test_no_harder_hold_while_the_foot_is_on_the_gas(self):
+    # early in a stop the hold is still climbing: the frame with the pedal, openpilot not yet letting go, never jumps to the stock hold
+    self.stopped()
+    climbing = self.stop(v_ego=0., frames=10)[1]
+    self.CS.out.gasPressed = True
+    assert self.send(0., state=structs.CarControl.Actuators.LongControlState.stopping)[1] < max(climbing + 3, 75)
+
+  def test_a_long_press_that_never_moves_the_car_also_comes_back_at_the_hold(self):
+    # what matters is the car not moving, not how long: 5 s on the gas with the car held still on a climb is the same risk
+    self.held_stop()
+    self.touch_gas(frames=250)
+    assert self.back()[:2] == (25, 81)
+
+  def test_a_touch_that_moved_the_car_starts_again_as_before(self):
+    self.held_stop()
+    self.touch_gas(v_ego=0.4)
+    assert self.back()[0] == 12
+    assert self.stop(-0.02, v_ego=0.)[1] < 50  # a new stop builds up from what is asked
+
+  def test_back_with_the_wheels_turning_is_no_jab_of_hold(self):
+    self.held_stop()
+    self.touch_gas(v_ego=0.1)
+    self.CS.out.vEgo = 0.1
+    self.CS.out.standstill = False
+    assert self.send(-0.01, state=structs.CarControl.Actuators.LongControlState.off)[0] == 12
+
+  def test_a_departure_right_after_the_touch_goes_to_the_gas(self):
+    self.held_stop()
+    self.touch_gas()
+    mode, brake, gas = self.back(0.3, structs.CarControl.Actuators.LongControlState.pid)
+    assert mode == 12 and brake == 0 and gas > 0
+
+  def test_the_brake_pedal_after_the_touch_changes_nothing(self):
+    self.held_stop()
+    self.touch_gas()
+    self.pedal()
+    for _ in range(10):
+      self.frame(0., state=structs.CarControl.Actuators.LongControlState.off, active=False, enabled=True)
+    self.pedal(False)
+    assert self.back()[0] == 12
+
+  def test_disengaged_during_the_touch_nothing_comes_back(self):
+    self.held_stop()
+    self.touch_gas(enabled=False)
+    assert self.back()[0] == 12
+
+  def test_a_touch_out_of_our_hold_changes_nothing(self):
+    # stopped and leaving on the gas, not holding: the driver's touch is no stop of ours
+    self.stopped()
+    self.send(0.3)
+    self.touch_gas()
+    assert self.back()[0] == 12
+
+  def test_openpilot_letting_go_later_with_no_pedal_is_as_before(self):
+    # back from the touch, openpilot lets go of the longitudinal for a moment with nobody on the pedals: no touch, as before
+    self.held_stop()
+    self.touch_gas()
+    self.back()
+    self.frame(0., state=structs.CarControl.Actuators.LongControlState.off, active=False, enabled=True)
+    assert self.back()[0] == 12
+
+  def test_the_hold_back_from_the_touch_lasts_for_this_touch_only(self):
+    self.held_stop()
+    self.touch_gas()
+    self.back()
+    self.send(0.3)  # the car leaves for real
+    self.CS.out.vEgo = 1.
+    self.CS.out.standstill = False
+    self.send(0.3)
+    self.touch_gas(v_ego=1.)
+    assert self.back()[0] == 12  # a touch on the move, then a stop: as before
+
+  def test_without_the_option_a_touch_comes_back_as_before(self):
+    # with the option: the stock hold at once (the test above)
+    self.test_the_recorded_touch_comes_back_at_the_hold_with_no_frame_of_gas()

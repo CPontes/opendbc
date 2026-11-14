@@ -64,6 +64,12 @@ ROLLBACK_HOLD_TIME = 1.  # s
 # A stop that comes back before the car moves keeps the hold it had. Behind a car creeping at 1 to 2 km/h the planner went to the
 # gas for a frame and back to stopping, and the hold started again from nothing: in the hold mode the pressure follows what is
 # asked, and it fell from 860 to 0 in 0.3 s with the car still stopped, which then rolled back 13 cm on a climb (route 40, 2.8 min)
+# Hexa (GwmFlags.GAS_TOUCH_HOLD): a touch of the gas at a stop of ours, with the car never moving, comes back at the stock hold
+# at once. The first frame back came before the planner was stopping again and went out as gas, and then the hold climbed from 42
+# (route 4b, 14 min): a frame of gas at a stop usually takes part of the pressure (route 41, 40 min: 1001 to 622). A light touch
+# keeps the camera in its hold, and with no frame of gas the pressure stays (route 37, 56 and 57 min). A firm one, or the stalk
+# pulled, makes the camera leave its hold: the pressure goes to 0 and nothing of ours brings it back with the car stopped, not
+# even 81 (routes 4b, 37 and 40). That this does not fix
 
 
 class CarController(CarControllerBase):
@@ -85,6 +91,7 @@ class CarController(CarControllerBase):
     self.holding = False
     self.hold_kept: float | None = None  # the hold this stop reached, until the car moves on
     self.rollback_left = 0.  # s
+    self.gas_at_stop = False  # the driver touched the gas while we held the car stopped, and it hasn't moved since
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -234,7 +241,17 @@ class CarController(CarControllerBase):
         else:
           self.rollback_left = max(self.rollback_left - DT_CTRL * self.params.STEER_STEP, 0.)
         rolled_back = rolling_back or self.rollback_left > 0.
-        brake_wanted = standstill or rolled_back or self.accel < (brake_off if self.braking else BRAKE_ON)
+        # back from a touch of the gas at a stop, with the wheels still stopped and no gas asked: the stock hold at once, even on
+        # the first frame back, which openpilot sends before the planner is stopping again
+        if not CC.enabled or CS.out.brakePressed or CS.out.vEgo >= HOLD_SPEED:
+          self.gas_at_stop = False
+        elif CS.out.gasPressed and self.holding and self.CP.flags & GwmFlags.GAS_TOUCH_HOLD:
+          self.gas_at_stop = True
+        back_on = CC.longActive and not CS.out.gasPressed
+        back_from_gas = self.gas_at_stop and back_on and (CS.out.standstill or CS.rolling_back) and actuators.accel <= 0.
+        if back_on:
+          self.gas_at_stop = False
+        brake_wanted = standstill or rolled_back or back_from_gas or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
         was_braking = self.braking
@@ -255,9 +272,10 @@ class CarController(CarControllerBase):
           self.accel = max(self.accel, self.brake_accel_last - BRAKE_RAMP_RATE * DT_CTRL * self.params.STEER_STEP)
         # it starts stopping, and stays while there's braking near a stop: a frame out of stopping must not drop it to regen
         near_stop = CS.out.vEgo < HOLD_SPEED
-        self.holding = self.braking and (rolled_back or (standstill and (self.holding or near_stop)) or (self.holding and near_stop))
+        self.holding = self.braking and (rolled_back or back_from_gas or (standstill and (self.holding or near_stop)) or
+                                         (self.holding and near_stop))
         if self.holding:
-          if rolled_back:
+          if rolled_back or back_from_gas:
             hold = HOLD_ACCEL
           elif CS.out.brakePressed:
             # the panda takes its level at the pedal and refuses more: the hold stops climbing until openpilot lets go
