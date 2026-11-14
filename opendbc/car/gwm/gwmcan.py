@@ -84,11 +84,15 @@ def create_steer_command(packer, CAN: CanBus, camera_stock_data: bytes, steer: f
 
 
 def create_longitudinal_command(packer, CAN, longitudinal_stock_data: bytes, accel, braking, active, standstill, pedal=False, hold=False,
-                                gas_pedal=False, stopped=False):
+                                gas_pedal=False, stopped=False, hold_gas=False):
   values = {s: _get_value(packer, "ACC_CMD", longitudinal_stock_data, s) for s in
             ["BRAKE_OR_GAS_REQ", "STANDSTILL_1", "STANDSTILL_2", "STANDSTILL_3"]}
   brake_cmd = accel_cmd = 0
-  if braking and active:
+  if hold_gas:
+    # Hexa (GAS_TAP_HOLD): a touch of the driver's gas at a stop of ours. Our hold stays, with no brake: the panda takes none with
+    # the pedal, and the car stopped in the hold mode takes this one (stopped_hold)
+    values.update(BRAKE_OR_GAS_REQ=MODE_HOLD, STANDSTILL_1=1, STANDSTILL_2=3, STANDSTILL_3=0)
+  elif braking and active:
     # the camera always sends these while braking, not only stopped. With 4 and 1 the car used the friction brakes
     # for everything: 10 times the hydraulic pressure of the stock ACC at the same deceleration, and no regen
     # the hold is the same frame with its own mode, as the camera sends it at the end of a stop

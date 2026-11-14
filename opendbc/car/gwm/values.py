@@ -33,6 +33,10 @@ class GwmFlags(IntFlag):
   # Hexa: back from a touch of the gas at a stop of ours, with the car never moving, the stock hold at once and no frame of gas.
   # Not a panda flag: the panda takes the hold with openpilot in control and the pedal off
   GAS_TOUCH_HOLD = 4
+  # Hexa: at a stop of ours, a touch of the driver's gas (short and light) doesn't take the hold away: our hold stays with no brake
+  # while the pedal is down, and openpilot comes back at the stock hold, as with GAS_TOUCH_HOLD. Longer or firmer, as before. Not a
+  # panda flag: the panda takes the hold with no brake from a stopped car
+  GAS_TAP_HOLD = 8
 
 
 class GwmSafetyFlags(IntFlag):

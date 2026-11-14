@@ -67,9 +67,19 @@ ROLLBACK_HOLD_TIME = 1.  # s
 # Hexa (GwmFlags.GAS_TOUCH_HOLD): a touch of the gas at a stop of ours, with the car never moving, comes back at the stock hold
 # at once. The first frame back came before the planner was stopping again and went out as gas, and then the hold climbed from 42
 # (route 4b, 14 min): a frame of gas at a stop usually takes part of the pressure (route 41, 40 min: 1001 to 622). A light touch
-# keeps the camera in its hold, and with no frame of gas the pressure stays (route 37, 56 and 57 min). A firm one, or the stalk
-# pulled, makes the camera leave its hold: the pressure goes to 0 and nothing of ours brings it back with the car stopped, not
-# even 81 (routes 4b, 37 and 40). That this does not fix
+# keeps the camera in its hold, and with no frame of gas the pressure stays (route 37, 56 and 57 min). A firm one makes the camera
+# resume, and the 20 we send then with the pedal lets the brake go: the pressure goes to 0 and nothing of ours brings it back with
+# the car stopped, not even 81 (routes 4b and 37). The camera resuming alone doesn't (route 4b, 10, 13 and 14 min: our hold, with no
+# drive-off bits, kept 446 to 488 for 2 s); before the drive-off bits were cleared it did (routes 3b, 3c and 41). That firm touch
+# is GAS_TAP_HOLD
+# Hexa (GwmFlags.GAS_TAP_HOLD): at a stop of ours, a touch of the driver's gas doesn't take the hold away at once. While the 0x143
+# that reaches the car is the hold, the car stays, gas or not: in 82 of 82 presses from a stop the pressure never fell and the car
+# never moved (gas_com_25.py). What let go was a frame of ours out of the hold. So for a touch our hold stays, with no brake (the
+# panda takes none with the pedal) and no drive-off bits, and openpilot comes back at the stock hold, as with GAS_TOUCH_HOLD. 12 of
+# 14 touches lasted 0.34 s or less, and none went past 32% of the pedal, where 7 of 68 departures did past 35%. Past the time or the
+# pedal, the wheels turning (the panda's "moving"), the brake or openpilot disengaged: as before, in the same frame
+GAS_TAP_TIME = 0.35  # s
+GAS_TAP_PEDAL = 0.35  # of the pedal
 
 
 class CarController(CarControllerBase):
@@ -92,6 +102,7 @@ class CarController(CarControllerBase):
     self.hold_kept: float | None = None  # the hold this stop reached, until the car moves on
     self.rollback_left = 0.  # s
     self.gas_at_stop = False  # the driver touched the gas while we held the car stopped, and it hasn't moved since
+    self.gas_tap: float | None = None  # how long the gas has been pressed from a stop we held; None with no pedal; past the time, out
     self.gas_ramp: float | None = None  # how far the gas has climbed since the brake, None when it isn't climbing
     self.pitch = FirstOrderFilter(0., 0.5, DT_CTRL)
     self.resume_prev = False
@@ -245,12 +256,23 @@ class CarController(CarControllerBase):
         # the first frame back, which openpilot sends before the planner is stopping again
         if not CC.enabled or CS.out.brakePressed or CS.out.vEgo >= HOLD_SPEED:
           self.gas_at_stop = False
-        elif CS.out.gasPressed and self.holding and self.CP.flags & GwmFlags.GAS_TOUCH_HOLD:
+        elif CS.out.gasPressed and self.holding and self.CP.flags & (GwmFlags.GAS_TOUCH_HOLD | GwmFlags.GAS_TAP_HOLD):
           self.gas_at_stop = True
         back_on = CC.longActive and not CS.out.gasPressed
         back_from_gas = self.gas_at_stop and back_on and (CS.out.standstill or CS.rolling_back) and actuators.accel <= 0.
         if back_on:
           self.gas_at_stop = False
+        # the press, timed from its first frame at a stop we hold (the hold of the frame before); once out, out for the whole press
+        if not CS.out.gasPressed:
+          self.gas_tap = None
+        elif self.gas_tap is None:
+          self.gas_tap = 0. if self.holding else GAS_TAP_TIME
+        else:
+          self.gas_tap += DT_CTRL * self.params.STEER_STEP
+        tap_hold = bool(self.CP.flags & GwmFlags.GAS_TAP_HOLD) and self.gas_tap is not None and self.gas_tap < GAS_TAP_TIME and \
+                   CS.gas_pedal <= GAS_TAP_PEDAL and CS.out.standstill and not CS.out.brakePressed and CC.enabled
+        if self.gas_tap is not None and not tap_hold:
+          self.gas_tap = GAS_TAP_TIME
         brake_wanted = standstill or rolled_back or back_from_gas or self.accel < (brake_off if self.braking else BRAKE_ON)
         self.brake_hold = BRAKE_HOLD_TIME if brake_wanted else max(self.brake_hold - DT_CTRL * self.params.STEER_STEP, 0.)
         brake_held = self.braking and self.brake_hold > 0. and self.accel < BRAKE_RELEASE and CS.out.vEgo > BRAKE_HOLD_MIN_SPEED
@@ -314,6 +336,7 @@ class CarController(CarControllerBase):
           hold=self.holding or (handing_off and self.handoff_hold),
           gas_pedal=CS.out.gasPressed,
           stopped=CS.out.standstill,
+          hold_gas=tap_hold,
         ))
 
     if self.frame % 5 == 0 and CS.hud_stock_data is not None: # 20 Hz

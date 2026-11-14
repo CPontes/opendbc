@@ -49,6 +49,7 @@ class CarState(CarStateBase):
     self.stalk_idle = False
     self.steer_fault_temporary_counter = 0
     self.rolling_back = False
+    self.gas_pedal = 0.
     self.speed_button = 0
     self.gap_button = 0
 
@@ -85,6 +86,7 @@ class CarState(CarStateBase):
       ret.cruiseState.speed = -1
 
     ret.standstill = abs(ret.vEgoRaw) < 1e-3
+    self.gas_pedal = cp.vl["CAR_OVERALL_SIGNALS2"]["GAS_POSITION"] / 100.  # how far down, of the pedal: the signal is in %
     ret.gasPressed = cp.vl["CAR_OVERALL_SIGNALS2"]["GAS_POSITION"] > 0
     ret.brakePressed = cp.vl["BRAKE2"]["PEDAL_BRAKE_PRESSED"] != 0
     ret.parkingBrake = cp.vl["CAR_OVERALL_SIGNALS"]["DRIVE_MODE"] == 0
