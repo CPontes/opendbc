@@ -118,6 +118,8 @@ class CANParser:
 
     self.vl: dict[int | str, dict[str, float]] = VLDict(self)
     self.vl_all: dict[int | str, dict[str, list[float]]] = {}
+    # Last accepted payload, before signal scaling. Missing until a frame is accepted.
+    self.vl_raw: dict[int | str, bytes] = {}
     self.ts_nanos: dict[int | str, dict[str, int]] = {}
     self.addresses: set[int] = set()
     self.message_states: dict[int, MessageState] = {}
@@ -228,6 +230,7 @@ class CANParser:
           continue
         if state.parse(t, dat):
           updated_addrs.add(address)
+          self.vl_raw[address] = self.vl_raw[state.name] = bytes(dat)
 
           vl_addr = self.vl[address]
           vl_all_addr = self.vl_all[address]

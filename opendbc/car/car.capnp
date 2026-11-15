@@ -204,6 +204,7 @@ struct CarState {
   lowSpeedAlert @56 :Bool;  # lost steering control due to a dynamic min steering speed
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   carNotReady @61 :Bool;  # car is transiently refusing engagement, used to prevent a fault if engaged
+  camLeadDistance @62 :Float32;  # m, to the car ahead as the car's own ACC measures it. At or below the field's zero when it sees none
 
   # cruise state
   cruiseState @10 :CruiseState;
@@ -244,6 +245,7 @@ struct CarState {
     available @2 :Bool;
     standstill @4 :Bool;
     nonAdaptive @5 :Bool;
+    driving @7 :Bool;  # the car's own ACC is in control right now. enabled can stay on with it paused
 
     deprecated :group {
       speedOffset @3 :Float32;
@@ -390,6 +392,8 @@ struct CarControl {
     cancel @0: Bool;
     resume @1: Bool;
     override @4: Bool;
+    decrease @5: Bool;  # one step down on the set speed, for cars that take it from a button
+    increase @6: Bool;  # one step up, the same way
 
     deprecated :group {
       speedOverride @2: Float32;
@@ -648,6 +652,7 @@ struct CarParams {
     volvo @36;
     bmw @37;
     mg @38;
+    gwm @39;
   }
 
   enum SteerControlType {
